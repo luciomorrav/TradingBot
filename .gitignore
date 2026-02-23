@@ -1,0 +1,15 @@
+config/secrets.env
+*.pyc
+__pycache__/
+.env
+logs/
+*.db
+*.db-journal
+*.db-wal
+.venv/
+venv/
+.idea/
+.vscode/
+*.egg-info/
+dist/
+build/

@@ -1,0 +1,61 @@
+general:
+  mode: paper  # paper | live
+  capital_usd: 500
+  log_level: INFO
+
+polymarket:
+  api_key: ${POLY_API_KEY}
+  chain_id: 137  # Polygon
+  min_profit_threshold: 0.015  # 1.5% mínimo
+  ws_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
+  max_position_per_market: 100  # USD (ajustado a $500 capital)
+  market_maker:
+    target_spread: 0.05
+    max_inventory: 200  # USD por mercado
+    repost_threshold: 0.02  # repostear si mercado mueve > 2c
+
+ib:
+  host: 127.0.0.1
+  port: 4002  # 4002 = paper, 4001 = live
+  client_id: 1
+  pairs:
+    - [BMA, GGAL]
+    - [YPF, PAMP]
+    - [CEPU, LOMA]
+    - [XLE, XOP]
+    - [XLF, KBE]
+    - [EWZ, ARGT]
+  zscore_entry: 2.0
+  zscore_exit: 0.0
+  zscore_stop: 3.5
+  cointegration_pvalue: 0.05
+
+kalshi:  # Fase 4
+  api_key: ${KALSHI_API_KEY}
+  demo_mode: true
+
+llm:
+  provider: anthropic
+  model: claude-haiku-4-5-20251001
+  fallback_model: claude-sonnet-4-6
+  validate_model_on_startup: true
+  api_key: ${ANTHROPIC_API_KEY}
+  max_cost_per_day: 0.50
+  news_edge_confidence_threshold: 0.70
+  probability_model_diff_threshold: 0.05
+
+risk:
+  max_daily_drawdown_pct: 5.0
+  max_position_pct: 20.0
+  max_total_exposure_pct: 60.0
+  consecutive_loss_cooldown: 3
+  cooldown_minutes: 30
+  execution_degradation:
+    min_fill_rate: 0.80
+    max_slippage_pct: 1.0
+    max_latency_seconds: 5
+
+telegram:
+  bot_token: ${TELEGRAM_BOT_TOKEN}
+  chat_id: ${TELEGRAM_CHAT_ID}
+  daily_summary_hour_utc: 22
