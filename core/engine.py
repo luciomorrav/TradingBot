@@ -163,27 +163,38 @@ class Engine:
     async def _daily_reset_loop(self):
         """Reset daily risk counters at midnight UTC."""
         while self._running:
-            now = datetime.now(timezone.utc)
-            next_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            if now >= next_midnight:
-                from datetime import timedelta
-                next_midnight += timedelta(days=1)
-            seconds_until = (next_midnight - now).total_seconds()
-            await asyncio.sleep(seconds_until)
-            self.risk_manager.reset_daily()
-            logger.info("Daily risk reset completed")
+            try:
+                now = datetime.now(timezone.utc)
+                next_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                if now >= next_midnight:
+                    from datetime import timedelta
+                    next_midnight += timedelta(days=1)
+                seconds_until = (next_midnight - now).total_seconds()
+                await asyncio.sleep(seconds_until)
+                self.risk_manager.reset_daily()
+                logger.info("Daily risk reset completed")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Error in daily reset loop")
+                await asyncio.sleep(60)
 
     async def _heartbeat_loop(self):
         """Send heartbeat to Telegram every 30 min."""
         while self._running:
-            await asyncio.sleep(1800)
-            if self.notify_callback:
-                summary = self.portfolio.summary()
-                await self.notify_callback(
-                    f"💓 Heartbeat | Equity: ${summary['equity']:.0f} "
-                    f"| PnL: ${summary['net_pnl']:+.2f} "
-                    f"| Positions: {summary['open_positions']}"
-                )
+            try:
+                await asyncio.sleep(1800)
+                if self.notify_callback:
+                    summary = self.portfolio.summary()
+                    await self.notify_callback(
+                        f"💓 Heartbeat | Equity: ${summary['equity']:.0f} "
+                        f"| PnL: ${summary['net_pnl']:+.2f} "
+                        f"| Positions: {summary['open_positions']}"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Error in heartbeat loop")
 
     async def _shutdown(self):
         logger.info("Engine shutting down...")

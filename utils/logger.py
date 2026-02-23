@@ -9,7 +9,9 @@ def setup_logging(level: str = "INFO", log_dir: str = "logs"):
     Path(log_dir).mkdir(exist_ok=True)
 
     root = logging.getLogger()
-    root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    _VALID_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+    level_name = level.upper() if level.upper() in _VALID_LEVELS else "INFO"
+    root.setLevel(getattr(logging, level_name))
 
     fmt = logging.Formatter(
         "%(asctime)s | %(levelname)-8s | %(name)-25s | %(message)s",

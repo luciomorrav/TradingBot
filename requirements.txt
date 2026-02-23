@@ -2,7 +2,7 @@ ib_async>=1.0.0
 py-clob-client>=0.34
 anthropic>=0.40
 python-telegram-bot==20.7
-aiohttp>=3.9
+aiohttp>=3.13.3
 pyyaml>=6.0
 python-dotenv>=1.0
 numpy>=1.26

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import logging
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -23,6 +24,20 @@ class Signal:
     def __post_init__(self):
         if self.metadata is None:
             self.metadata = {}
+        if self.direction not in ("buy", "sell"):
+            raise ValueError(f"Invalid direction: {self.direction!r}, must be 'buy' or 'sell'")
+        if not math.isfinite(self.price) or self.price <= 0:
+            raise ValueError(f"Invalid price: {self.price}")
+        if not math.isfinite(self.size_usd) or self.size_usd <= 0:
+            raise ValueError(f"Invalid size_usd: {self.size_usd}")
+        if not (0 <= self.confidence <= 1):
+            raise ValueError(f"Confidence must be 0-1, got {self.confidence}")
+
+    def __repr__(self):
+        return (
+            f"Signal(strategy={self.strategy!r}, market={self.market_id}, "
+            f"{self.direction} ${self.size_usd:.2f} @ {self.price:.4f})"
+        )
 
 
 class BaseStrategy(abc.ABC):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -71,7 +72,7 @@ class Portfolio:
         self.initial_capital = capital_usd
         self.cash = capital_usd
         self.positions: dict[str, Position] = {}  # key: "{platform}:{market_id}:{strategy}"
-        self.closed_trades: list[Trade] = []
+        self.closed_trades: deque[Trade] = deque(maxlen=10000)
         self.realized_pnl = 0.0
         self.total_fees = 0.0
         self.total_llm_cost = 0.0
@@ -131,13 +132,15 @@ class Portfolio:
             self.closed_trades.append(trade)
             return pnl
 
-    def update_price(self, platform: Platform, market_id: str, strategy: str, price: float):
-        key = self._position_key(platform, market_id, strategy)
-        if key in self.positions:
-            self.positions[key].current_price = price
+    async def update_price(self, platform: Platform, market_id: str, strategy: str, price: float):
+        async with self._lock:
+            key = self._position_key(platform, market_id, strategy)
+            if key in self.positions:
+                self.positions[key].current_price = price
 
-    def add_llm_cost(self, cost: float):
-        self.total_llm_cost += cost
+    async def add_llm_cost(self, cost: float):
+        async with self._lock:
+            self.total_llm_cost += cost
 
     # --- Exposure and PnL queries ---
 
