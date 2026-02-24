@@ -1,19 +1,26 @@
 """Trading Bot — Entry point.
 
 Usage:
-    python main.py              # Uses config/settings.yaml
+    python main.py              # Uses config/settings.yaml (paper mode)
     python main.py --live       # Override to live mode
 """
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 
+from connectors.polymarket_client import PolymarketClient
+from connectors.telegram_bot import TelegramBot
 from core.engine import Engine
 from core.portfolio import Portfolio
 from core.risk_manager import RiskConfig, RiskManager
+from data.db import Database
+from strategies.poly_market_maker import PolyMarketMaker
 from utils.helpers import load_config
 from utils.logger import setup_logging
+
+logger = logging.getLogger("main")
 
 
 async def main():
@@ -27,28 +34,47 @@ async def main():
     capital = config["general"]["capital_usd"]
     mode = config["general"]["mode"]
 
+    # --- Core ---
     portfolio = Portfolio(capital_usd=capital)
     risk_config = RiskConfig.from_dict(config.get("risk", {}))
     risk_manager = RiskManager(portfolio, risk_config)
-
     engine = Engine(portfolio, risk_manager, config)
 
-    # --- Register strategies (add as they're implemented) ---
-    # from strategies.poly_market_maker import PolyMarketMaker
-    # mm = PolyMarketMaker("poly_mm", portfolio, risk_manager, config.get("polymarket", {}))
-    # engine.add_strategy(mm, interval_seconds=5.0)
+    # --- Database ---
+    db = Database()
+    await db.connect()
+    engine.set_db(db.log_trade)
 
-    # --- Register connectors (add as they're implemented) ---
-    # from connectors.telegram_bot import TelegramBot
-    # tg = TelegramBot(config.get("telegram", {}))
-    # engine.set_notify(tg.send_message)
+    # --- Telegram ---
+    tg = TelegramBot(config.get("telegram", {}), engine=engine)
+    await tg.start()
+    engine.set_notify(tg.send_message)
 
-    import logging
-    logger = logging.getLogger("main")
+    # --- Polymarket connector ---
+    poly_client = PolymarketClient(config.get("polymarket", {}))
+    await poly_client.connect()
+
+    # --- Strategies ---
+    mm = PolyMarketMaker(
+        name="poly_mm",
+        portfolio=portfolio,
+        risk_manager=risk_manager,
+        config=config.get("polymarket", {}),
+        poly_client=poly_client,
+    )
+    engine.add_strategy(mm, interval_seconds=5.0)
+
     logger.info("Starting bot in %s mode with $%.0f capital", mode, capital)
-    logger.info("No strategies registered yet — implement and uncomment in main.py")
 
-    await engine.run()
+    try:
+        await engine.run()
+    finally:
+        # Graceful shutdown of all components
+        logger.info("Shutting down components...")
+        await poly_client.disconnect()
+        await tg.stop()
+        await db.disconnect()
+        logger.info("All components stopped")
 
 
 if __name__ == "__main__":

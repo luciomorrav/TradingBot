@@ -1,0 +1,401 @@
+"""Polymarket CLOB connector — WebSocket-first with REST for orders.
+
+Market data flows via WebSocket (no rate limits).
+Order placement via REST (60 orders/min limit).
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+import aiohttp
+
+logger = logging.getLogger(__name__)
+
+CLOB_HOST = "https://clob.polymarket.com"
+GAMMA_HOST = "https://gamma-api.polymarket.com"
+WS_MARKET = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+WS_USER = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
+
+
+@dataclass
+class OrderBookLevel:
+    price: float
+    size: float
+
+
+@dataclass
+class OrderBook:
+    market_id: str
+    token_id: str
+    bids: list[OrderBookLevel] = field(default_factory=list)
+    asks: list[OrderBookLevel] = field(default_factory=list)
+    timestamp: float = 0.0
+
+    @property
+    def best_bid(self) -> float:
+        return self.bids[0].price if self.bids else 0.0
+
+    @property
+    def best_ask(self) -> float:
+        return self.asks[0].price if self.asks else 1.0
+
+    @property
+    def mid_price(self) -> float:
+        if not self.bids and not self.asks:
+            return 0.5
+        return (self.best_bid + self.best_ask) / 2
+
+    @property
+    def spread(self) -> float:
+        return self.best_ask - self.best_bid
+
+    @property
+    def bid_depth(self) -> float:
+        return sum(lvl.size for lvl in self.bids)
+
+    @property
+    def ask_depth(self) -> float:
+        return sum(lvl.size for lvl in self.asks)
+
+
+@dataclass
+class Market:
+    id: str
+    question: str
+    slug: str
+    active: bool
+    end_date: str
+    tokens: list[dict]  # [{token_id, outcome, price}]
+    volume: float = 0.0
+    liquidity: float = 0.0
+    category: str = ""
+    fee: float = 0.0
+
+
+class PolymarketClient:
+    """WebSocket-first Polymarket connector.
+
+    Usage:
+        client = PolymarketClient(config)
+        await client.connect()
+        await client.subscribe_market(["token_id_1", "token_id_2"])
+        book = client.get_order_book("token_id_1")
+    """
+
+    def __init__(self, config: dict):
+        self.config = config
+        self._api_key = config.get("api_key", "")
+        self._api_secret = config.get("api_secret", "")
+        self._api_passphrase = config.get("api_passphrase", "")
+
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._ws_market: Optional[aiohttp.ClientWebSocketResponse] = None
+        self._ws_user: Optional[aiohttp.ClientWebSocketResponse] = None
+        self._ws_task: Optional[asyncio.Task] = None
+        self._user_ws_task: Optional[asyncio.Task] = None
+
+        self._order_books: dict[str, OrderBook] = {}
+        self._markets: dict[str, Market] = {}
+        self._subscribed_tokens: set[str] = set()
+
+        self._on_book_update: Optional[Callable] = None
+        self._on_trade: Optional[Callable] = None
+
+        self._running = False
+
+    # --- Lifecycle ---
+
+    async def connect(self):
+        timeout = aiohttp.ClientTimeout(total=30)
+        self._session = aiohttp.ClientSession(timeout=timeout)
+        self._running = True
+        logger.info("Polymarket client connected")
+
+    async def disconnect(self):
+        self._running = False
+        for ws in (self._ws_market, self._ws_user):
+            if ws and not ws.closed:
+                await ws.close()
+        for task in (self._ws_task, self._user_ws_task):
+            if task and not task.done():
+                task.cancel()
+        if self._session:
+            await self._session.close()
+        logger.info("Polymarket client disconnected")
+
+    # --- Callbacks ---
+
+    def on_book_update(self, callback: Callable):
+        self._on_book_update = callback
+
+    def on_trade(self, callback: Callable):
+        self._on_trade = callback
+
+    # --- Market discovery (REST, call sparingly: 60 req/min) ---
+
+    async def fetch_active_markets(self, limit: int = 100) -> list[Market]:
+        """Fetch active markets from Gamma API."""
+        markets: list[Market] = []
+        offset = 0
+        while True:
+            params = {"limit": limit, "offset": offset, "closed": "false", "active": "true"}
+            data = await self._get(f"{GAMMA_HOST}/markets", params)
+            if not data:
+                break
+            for m in data:
+                tokens = []
+                outcomes = m.get("outcomes", [])
+                prices = m.get("outcomePrices", [])
+                clob_ids = m.get("clobTokenIds", [])
+                for i, outcome in enumerate(outcomes):
+                    if i < len(clob_ids):
+                        tokens.append({
+                            "token_id": clob_ids[i],
+                            "outcome": outcome,
+                            "price": float(prices[i]) if i < len(prices) else 0.0,
+                        })
+                market = Market(
+                    id=m.get("id", ""),
+                    question=m.get("question", ""),
+                    slug=m.get("slug", ""),
+                    active=m.get("active", False),
+                    end_date=m.get("endDate", ""),
+                    tokens=tokens,
+                    volume=float(m.get("volume", 0)),
+                    liquidity=float(m.get("liquidity", 0)),
+                    category=m.get("category", ""),
+                    fee=float(m.get("fee", 0)),
+                )
+                markets.append(market)
+                self._markets[market.id] = market
+            if len(data) < limit:
+                break
+            offset += limit
+        logger.info("Fetched %d active markets", len(markets))
+        return markets
+
+    async def fetch_order_book(self, token_id: str) -> OrderBook:
+        """Fetch order book snapshot via REST."""
+        data = await self._get(f"{CLOB_HOST}/book", {"token_id": token_id})
+        if not data:
+            return OrderBook(market_id="", token_id=token_id)
+        return self._parse_book(token_id, data)
+
+    # --- WebSocket: Market channel (public, no auth) ---
+
+    async def subscribe_market(self, token_ids: list[str]):
+        """Subscribe to market data via WebSocket."""
+        new_tokens = [t for t in token_ids if t not in self._subscribed_tokens]
+        if not new_tokens:
+            return
+        self._subscribed_tokens.update(new_tokens)
+
+        if self._ws_task is None or self._ws_task.done():
+            self._ws_task = asyncio.create_task(self._market_ws_loop())
+        elif self._ws_market and not self._ws_market.closed:
+            await self._ws_market.send_json({
+                "assets_ids": new_tokens,
+                "type": "market",
+                "custom_feature_enabled": True,
+            })
+            logger.info("Subscribed to %d additional tokens", len(new_tokens))
+
+    async def _market_ws_loop(self):
+        """WebSocket loop with auto-reconnect."""
+        while self._running:
+            try:
+                async with self._session.ws_connect(WS_MARKET, heartbeat=30) as ws:
+                    self._ws_market = ws
+                    if self._subscribed_tokens:
+                        await ws.send_json({
+                            "assets_ids": list(self._subscribed_tokens),
+                            "type": "market",
+                            "custom_feature_enabled": True,
+                        })
+                        logger.info("Market WS connected, subscribed to %d tokens", len(self._subscribed_tokens))
+
+                    async for raw in ws:
+                        if raw.type == aiohttp.WSMsgType.TEXT:
+                            await self._handle_market_msg(raw.data)
+                        elif raw.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING):
+                            break
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Market WS error")
+
+            if self._running:
+                logger.info("Market WS reconnecting in 5s...")
+                await asyncio.sleep(5)
+
+    async def _handle_market_msg(self, raw_data: str):
+        try:
+            msgs = json.loads(raw_data)
+            if not isinstance(msgs, list):
+                msgs = [msgs]
+        except json.JSONDecodeError:
+            logger.warning("Invalid JSON from market WS")
+            return
+
+        for data in msgs:
+            event_type = data.get("event_type", "")
+            token_id = data.get("asset_id", "")
+
+            if event_type == "book":
+                book = self._parse_book(token_id, data)
+                self._order_books[token_id] = book
+                if self._on_book_update:
+                    await self._on_book_update(token_id, book)
+
+            elif event_type == "price_change":
+                if token_id in self._order_books:
+                    book = self._order_books[token_id]
+                    self._apply_price_changes(book, data.get("changes", []))
+                    book.timestamp = time.time()
+                    if self._on_book_update:
+                        await self._on_book_update(token_id, book)
+
+            elif event_type == "last_trade_price":
+                if self._on_trade:
+                    await self._on_trade(data)
+
+    # --- WebSocket: User channel (authenticated) ---
+
+    async def subscribe_user(self):
+        """Subscribe to user events (order fills, placements)."""
+        if not self._api_key:
+            logger.warning("No API credentials, skipping user WS")
+            return
+        if self._user_ws_task is None or self._user_ws_task.done():
+            self._user_ws_task = asyncio.create_task(self._user_ws_loop())
+
+    async def _user_ws_loop(self):
+        while self._running:
+            try:
+                async with self._session.ws_connect(WS_USER, heartbeat=30) as ws:
+                    self._ws_user = ws
+                    await ws.send_json({
+                        "type": "user",
+                        "apiKey": self._api_key,
+                        "secret": self._api_secret,
+                        "passphrase": self._api_passphrase,
+                    })
+                    logger.info("User WS connected")
+
+                    async for raw in ws:
+                        if raw.type == aiohttp.WSMsgType.TEXT:
+                            await self._handle_user_msg(raw.data)
+                        elif raw.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
+                            break
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("User WS error")
+
+            if self._running:
+                logger.info("User WS reconnecting in 5s...")
+                await asyncio.sleep(5)
+
+    async def _handle_user_msg(self, raw_data: str):
+        try:
+            data = json.loads(raw_data)
+        except json.JSONDecodeError:
+            return
+        if self._on_trade and data.get("event_type") in ("trade", "order"):
+            await self._on_trade(data)
+
+    # --- Order placement (REST) ---
+
+    async def place_order(
+        self, token_id: str, side: str, price: float, size: float, order_type: str = "GTC",
+    ) -> dict:
+        """Place a limit order. Returns order response dict.
+
+        In live mode, this will use py-clob-client SDK for EIP-712 signing.
+        Currently structured for paper mode.
+        """
+        order_data = {
+            "token_id": token_id,
+            "side": side.upper(),
+            "price": price,
+            "size": size,
+            "type": order_type,
+        }
+        logger.info("Order: %s %.1f shares @ %.4f (token: %.8s...)", side.upper(), size, price, token_id)
+
+        # TODO: Integrate py-clob-client for live order signing:
+        # signed = self._clob.create_order(OrderArgs(price=price, size=size, side=side, token_id=token_id))
+        # return self._clob.post_order(signed, OrderType.GTC)
+
+        return {"order_id": f"paper_{int(time.time())}", "status": "paper", **order_data}
+
+    async def cancel_order(self, order_id: str) -> bool:
+        logger.info("Cancel order: %s", order_id)
+        return True
+
+    async def cancel_all_orders(self) -> int:
+        logger.info("Cancel all orders")
+        return 0
+
+    # --- Queries ---
+
+    def get_order_book(self, token_id: str) -> Optional[OrderBook]:
+        return self._order_books.get(token_id)
+
+    def get_market(self, market_id: str) -> Optional[Market]:
+        return self._markets.get(market_id)
+
+    # --- Internal ---
+
+    def _parse_book(self, token_id: str, data: dict) -> OrderBook:
+        bids = sorted(
+            [OrderBookLevel(price=float(b["price"]), size=float(b["size"])) for b in data.get("bids", [])],
+            key=lambda x: x.price, reverse=True,
+        )
+        asks = sorted(
+            [OrderBookLevel(price=float(a["price"]), size=float(a["size"])) for a in data.get("asks", [])],
+            key=lambda x: x.price,
+        )
+        return OrderBook(
+            market_id=data.get("market", ""), token_id=token_id,
+            bids=bids, asks=asks, timestamp=time.time(),
+        )
+
+    def _apply_price_changes(self, book: OrderBook, changes: list):
+        for change in changes:
+            side = change.get("side", "").upper()
+            price = float(change.get("price", 0))
+            size = float(change.get("size", 0))
+
+            levels = book.bids if side == "BUY" else book.asks
+            levels[:] = [lvl for lvl in levels if abs(lvl.price - price) > 1e-9]
+            if size > 0:
+                levels.append(OrderBookLevel(price=price, size=size))
+
+            if side == "BUY":
+                levels.sort(key=lambda x: x.price, reverse=True)
+            else:
+                levels.sort(key=lambda x: x.price)
+
+    async def _get(self, url: str, params: dict = None) -> Optional[dict | list]:
+        try:
+            async with self._session.get(url, params=params) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                if resp.status == 429:
+                    logger.warning("Rate limited on %s", url)
+                    await asyncio.sleep(5)
+                    return None
+                logger.error("GET %s → %d", url, resp.status)
+                return None
+        except asyncio.TimeoutError:
+            logger.error("Timeout: GET %s", url)
+            return None
+        except Exception:
+            logger.exception("Error: GET %s", url)
+            return None
