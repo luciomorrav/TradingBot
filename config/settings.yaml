@@ -18,15 +18,22 @@ ib:
   host: 127.0.0.1
   port: 4002  # 4002 = paper, 4001 = live
   client_id: 1
-  pairs:
-    - [BMA, GGAL]
-    - [YPF, PAMP]
-    - [CEPU, LOMA]
-    - [XLE, XOP]
-    - [XLF, KBE]
-    - [EWZ, ARGT]
+  # Universe to scan for cointegration (strategy picks best pairs dynamically)
+  universe:
+    sector_etfs: [XLE, XOP, XLF, KBE, GDX, GDXJ, XLK, VGT, XLV, XBI]
+    large_cap: [KO, PEP, V, MA, JPM, BAC, HD, LOW, MSFT, AAPL]
+    commodities: [GLD, GDX, USO, SLV, PAAS]
+    index: [SPY, IVV, QQQ, QQQM, IWM, VTWO]
+    dual_class: [[GOOG, GOOGL]]
+  # Cointegration scanner params
+  scanner:
+    lookback_days: 120       # rolling window for Engle-Granger test
+    rescan_hours: 24         # re-scan universe every N hours
+    max_active_pairs: 5      # max simultaneous pairs traded
+    min_half_life: 5         # days — skip pairs that revert too fast (noise)
+    max_half_life: 60        # days — skip pairs that revert too slow
   zscore_entry: 2.0
-  zscore_exit: 0.0
+  zscore_exit: 0.5
   zscore_stop: 3.5
   cointegration_pvalue: 0.05
 

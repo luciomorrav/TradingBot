@@ -10,12 +10,14 @@ import asyncio
 import logging
 import sys
 
+from connectors.ib_client import IBClient
 from connectors.polymarket_client import PolymarketClient
 from connectors.telegram_bot import TelegramBot
 from core.engine import Engine
 from core.portfolio import Portfolio
 from core.risk_manager import RiskConfig, RiskManager
 from data.db import Database
+from strategies.ib_pairs import IBPairsTrader
 from strategies.poly_market_maker import PolyMarketMaker
 from utils.helpers import load_config
 from utils.logger import setup_logging
@@ -64,6 +66,19 @@ async def main():
     )
     engine.add_strategy(mm, interval_seconds=5.0)
 
+    # --- IB connector + pairs trading (paper only in Phase 1) ---
+    ib_client = IBClient(config.get("ib", {}))
+    await ib_client.connect()
+
+    pairs_trader = IBPairsTrader(
+        name="ib_pairs",
+        portfolio=portfolio,
+        risk_manager=risk_manager,
+        config=config.get("ib", {}),
+        ib_client=ib_client,
+    )
+    engine.add_strategy(pairs_trader, interval_seconds=30.0)
+
     logger.info("Starting bot in %s mode with $%.0f capital", mode, capital)
 
     try:
@@ -71,6 +86,7 @@ async def main():
     finally:
         # Graceful shutdown of all components
         logger.info("Shutting down components...")
+        await ib_client.disconnect()
         await poly_client.disconnect()
         await tg.stop()
         await db.disconnect()
