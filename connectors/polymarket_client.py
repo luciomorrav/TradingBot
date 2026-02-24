@@ -92,6 +92,12 @@ class PolymarketClient:
         self._api_key = config.get("api_key", "")
         self._api_secret = config.get("api_secret", "")
         self._api_passphrase = config.get("api_passphrase", "")
+        self._private_key = config.get("private_key", "")
+        self._chain_id = config.get("chain_id", 137)
+
+        # py-clob-client for live order signing (initialized in connect() if creds present)
+        self._clob = None
+        self._live_enabled = False
 
         self._session: Optional[aiohttp.ClientSession] = None
         self._ws_market: Optional[aiohttp.ClientWebSocketResponse] = None
@@ -114,6 +120,41 @@ class PolymarketClient:
         timeout = aiohttp.ClientTimeout(total=30)
         self._session = aiohttp.ClientSession(timeout=timeout)
         self._running = True
+
+        # Initialize py-clob-client for live order signing if credentials are present
+        if self._private_key and not self._private_key.startswith("${"):
+            try:
+                from py_clob_client.client import ClobClient
+                from py_clob_client.clob_types import ApiCreds
+
+                if (self._api_secret and not self._api_secret.startswith("${")
+                        and self._api_passphrase and not self._api_passphrase.startswith("${")):
+                    # Full L2 auth — can post and cancel orders
+                    creds = ApiCreds(
+                        api_key=self._api_key,
+                        api_secret=self._api_secret,
+                        api_passphrase=self._api_passphrase,
+                    )
+                    self._clob = ClobClient(
+                        CLOB_HOST, key=self._private_key,
+                        chain_id=self._chain_id, creds=creds,
+                    )
+                    self._live_enabled = True
+                    logger.info("Polymarket CLOB client initialized (L2 auth — live orders enabled)")
+                else:
+                    # L1 only — can derive creds but not trade yet
+                    self._clob = ClobClient(
+                        CLOB_HOST, key=self._private_key,
+                        chain_id=self._chain_id,
+                    )
+                    logger.info("Polymarket CLOB client initialized (L1 auth only — derive creds with derive_api_creds())")
+            except ImportError:
+                logger.warning("py-clob-client not installed — live orders disabled")
+            except Exception:
+                logger.exception("Failed to initialize CLOB client")
+        else:
+            logger.info("Polymarket running in paper mode (no private key configured)")
+
         logger.info("Polymarket client connected")
 
     async def disconnect(self):
@@ -314,33 +355,121 @@ class PolymarketClient:
     async def place_order(
         self, token_id: str, side: str, price: float, size: float, order_type: str = "GTC",
     ) -> dict:
-        """Place a limit order. Returns order response dict.
+        """Place a limit order. Uses py-clob-client for live, simulates for paper.
 
-        In live mode, this will use py-clob-client SDK for EIP-712 signing.
-        Currently structured for paper mode.
+        Args:
+            token_id: Conditional token ID
+            side: "BUY" or "SELL"
+            price: Price between 0 and 1
+            size: Number of shares
+            order_type: "GTC", "GTD", "FOK"
         """
-        order_data = {
+        logger.info("Order: %s %.1f shares @ %.4f (token: %.8s...)", side.upper(), size, price, token_id)
+
+        if self._live_enabled and self._clob:
+            return await self._place_live_order(token_id, side, price, size, order_type)
+
+        # Paper mode — simulate instant fill
+        return {
+            "order_id": f"paper_{int(time.time())}",
+            "status": "paper",
             "token_id": token_id,
             "side": side.upper(),
             "price": price,
             "size": size,
-            "type": order_type,
         }
-        logger.info("Order: %s %.1f shares @ %.4f (token: %.8s...)", side.upper(), size, price, token_id)
 
-        # TODO: Integrate py-clob-client for live order signing:
-        # signed = self._clob.create_order(OrderArgs(price=price, size=size, side=side, token_id=token_id))
-        # return self._clob.post_order(signed, OrderType.GTC)
+    async def _place_live_order(
+        self, token_id: str, side: str, price: float, size: float, order_type: str,
+    ) -> dict:
+        """Place a signed order via py-clob-client (runs in executor to avoid blocking)."""
+        from py_clob_client.clob_types import OrderArgs, OrderType as ClobOrderType
+        from py_clob_client.order_builder.constants import BUY, SELL
 
-        return {"order_id": f"paper_{int(time.time())}", "status": "paper", **order_data}
+        loop = asyncio.get_running_loop()
+
+        clob_side = BUY if side.upper() == "BUY" else SELL
+        order_args = OrderArgs(
+            price=price,
+            size=size,
+            side=clob_side,
+            token_id=token_id,
+        )
+
+        try:
+            # create_order and post_order are synchronous — run in thread
+            signed = await loop.run_in_executor(None, self._clob.create_order, order_args)
+
+            otype_map = {"GTC": ClobOrderType.GTC, "GTD": ClobOrderType.GTD, "FOK": ClobOrderType.FOK}
+            clob_type = otype_map.get(order_type, ClobOrderType.GTC)
+
+            resp = await loop.run_in_executor(None, self._clob.post_order, signed, clob_type)
+
+            order_id = resp.get("orderID", resp.get("order_id", ""))
+            logger.info("Live order placed: %s (id: %s)", resp.get("status", "unknown"), order_id)
+
+            return {
+                "order_id": order_id,
+                "status": resp.get("status", "live"),
+                "token_id": token_id,
+                "side": side.upper(),
+                "price": price,
+                "size": size,
+                "raw_response": resp,
+            }
+        except Exception:
+            logger.exception("Failed to place live order")
+            return {}
 
     async def cancel_order(self, order_id: str) -> bool:
+        """Cancel a single order by ID."""
         logger.info("Cancel order: %s", order_id)
+        if order_id.startswith("paper_"):
+            return True
+
+        if self._live_enabled and self._clob:
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(None, self._clob.cancel, order_id)
+                logger.info("Order cancelled: %s", order_id)
+                return True
+            except Exception:
+                logger.exception("Failed to cancel order %s", order_id)
+                return False
         return True
 
     async def cancel_all_orders(self) -> int:
+        """Cancel all open orders."""
         logger.info("Cancel all orders")
+        if self._live_enabled and self._clob:
+            loop = asyncio.get_running_loop()
+            try:
+                resp = await loop.run_in_executor(None, self._clob.cancel_all)
+                cancelled = len(resp) if isinstance(resp, list) else 0
+                logger.info("Cancelled %d orders", cancelled)
+                return cancelled
+            except Exception:
+                logger.exception("Failed to cancel all orders")
+                return 0
         return 0
+
+    async def derive_api_creds(self) -> dict:
+        """Derive API credentials from private key (one-time setup helper)."""
+        if not self._clob:
+            logger.error("CLOB client not initialized — need private key")
+            return {}
+        loop = asyncio.get_running_loop()
+        try:
+            creds = await loop.run_in_executor(None, self._clob.create_or_derive_api_creds)
+            logger.info("API credentials derived successfully")
+            return {
+                "api_key": creds.api_key,
+                "api_secret": creds.api_secret,
+                "api_passphrase": creds.api_passphrase,
+            }
+        except Exception:
+            logger.exception("Failed to derive API credentials")
+            return {}
 
     # --- Queries ---
 

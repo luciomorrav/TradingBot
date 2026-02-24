@@ -49,6 +49,7 @@ class IBClient:
         self._subscriptions: dict[str, Contract] = {}
         self._tickers: dict[str, IBTicker] = {}
         self._on_tick: Optional[Callable] = None
+        self._event_registered = False
 
         # Attach events once
         self.ib.connectedEvent += self._on_connected
@@ -176,8 +177,12 @@ class IBClient:
             logger.warning("IB not connected, cannot subscribe")
             return
 
-        self._on_tick = on_tick
-        self.ib.pendingTickersEvent += self._handle_tickers
+        if on_tick:
+            self._on_tick = on_tick
+        # Register event handler only once
+        if not self._event_registered:
+            self.ib.pendingTickersEvent += self._handle_tickers
+            self._event_registered = True
 
         for symbol in symbols:
             if symbol in self._subscriptions:

@@ -5,6 +5,7 @@ Quotes both sides of prediction markets with:
 - Informed flow detection (large orders → widen spread)
 - Market selection (niches with $500-5000/day volume)
 - Dynamic fee awareness per market
+- True quote management: inventory from fills, order lifecycle, cancel/repost
 """
 from __future__ import annotations
 
@@ -17,6 +18,23 @@ from connectors.polymarket_client import OrderBook, Market, PolymarketClient
 from core.portfolio import Platform, Portfolio, Side
 from core.risk_manager import RiskManager
 from strategies.base_strategy import BaseStrategy, Signal
+
+
+@dataclass
+class LiveOrder:
+    """Tracks a live order placed on Polymarket."""
+    order_id: str
+    token_id: str
+    side: str        # "buy" or "sell"
+    price: float
+    size: float      # shares
+    size_usd: float
+    placed_at: float
+    ttl: float = 60.0  # seconds before stale
+
+    @property
+    def is_stale(self) -> bool:
+        return time.time() - self.placed_at > self.ttl
 
 
 @dataclass
@@ -56,13 +74,14 @@ class PolyMarketMaker(BaseStrategy):
         self.repost_threshold = self.mm_config.get("repost_threshold", 0.02)
         self.max_position_per_market = config.get("max_position_per_market", 100)
         self.informed_flow_threshold = 500  # USD
+        self.order_ttl = self.mm_config.get("order_ttl", 60.0)  # seconds
 
         # Avellaneda-Stoikov parameters
         self.gamma = 0.1  # risk aversion (higher = wider spreads)
         self.kappa = 1.5  # order arrival intensity
 
         self.market_states: dict[str, MarketState] = {}  # token_id -> state
-        self._active_orders: dict[str, dict] = {}  # order_id -> order_data
+        self._active_orders: dict[str, LiveOrder] = {}    # order_id -> LiveOrder
 
     async def on_start(self):
         self.logger.info("Market maker starting — selecting markets...")
@@ -89,12 +108,16 @@ class PolyMarketMaker(BaseStrategy):
         self.logger.info("Market maker active on %d tokens across %d markets", len(token_ids), len(selected))
 
     async def on_stop(self):
-        cancelled = await self.client.cancel_all_orders()
-        self.logger.info("Market maker stopped, cancelled %d orders", cancelled)
+        # Cancel all live orders before stopping
+        await self._cancel_all_live_orders()
+        self.logger.info("Market maker stopped")
 
     async def evaluate(self) -> list[Signal]:
         signals: list[Signal] = []
         now = time.time()
+
+        # First: cancel stale orders and repost if market moved
+        await self._manage_order_lifecycle()
 
         for tid, state in self.market_states.items():
             book = self.client.get_order_book(tid)
@@ -107,6 +130,10 @@ class PolyMarketMaker(BaseStrategy):
 
             # Skip if we just quoted
             if now - state.last_quote_time < 3:
+                continue
+
+            # Skip if we already have live orders for this token
+            if self._has_live_orders(tid):
                 continue
 
             # Skip if spread is too tight (can't profit)
@@ -135,7 +162,7 @@ class PolyMarketMaker(BaseStrategy):
             shares_bid = size / max(bid_price, 0.01)
             shares_ask = size / max(1 - ask_price, 0.01)
 
-            # Bid signal (buy YES)
+            # Bid signal (buy YES) — only if inventory allows
             if bid_price > 0.01 and state.inventory < self.max_inventory:
                 signals.append(Signal(
                     strategy=self.name,
@@ -145,10 +172,15 @@ class PolyMarketMaker(BaseStrategy):
                     size_usd=size,
                     price=bid_price,
                     confidence=0.6,
-                    metadata={"platform": "polymarket", "token_id": tid, "shares": shares_bid},
+                    metadata={
+                        "platform": "polymarket",
+                        "token_id": tid,
+                        "shares": shares_bid,
+                        "fee": state.fee_rate * size,
+                    },
                 ))
 
-            # Ask signal (sell YES)
+            # Ask signal (sell YES) — only if inventory allows
             if ask_price < 0.99 and state.inventory > -self.max_inventory:
                 signals.append(Signal(
                     strategy=self.name,
@@ -158,24 +190,128 @@ class PolyMarketMaker(BaseStrategy):
                     size_usd=size,
                     price=ask_price,
                     confidence=0.6,
-                    metadata={"platform": "polymarket", "token_id": tid, "shares": shares_ask},
+                    metadata={
+                        "platform": "polymarket",
+                        "token_id": tid,
+                        "shares": shares_ask,
+                        "fee": state.fee_rate * size,
+                    },
                 ))
 
             state.last_quote_time = now
 
         return signals
 
+    # --- Order lifecycle management ---
+
+    async def _manage_order_lifecycle(self):
+        """Cancel stale orders and orders on tokens where market moved beyond threshold."""
+        to_cancel = []
+
+        for oid, order in list(self._active_orders.items()):
+            # Cancel stale orders (exceeded TTL)
+            if order.is_stale:
+                to_cancel.append(oid)
+                continue
+
+            # Cancel if market moved beyond repost threshold
+            state = self.market_states.get(order.token_id)
+            if state:
+                book = self.client.get_order_book(order.token_id)
+                if book and state.last_mid > 0:
+                    if abs(book.mid_price - state.last_mid) > self.repost_threshold:
+                        to_cancel.append(oid)
+
+        for oid in to_cancel:
+            await self._cancel_order(oid)
+
+    def _has_live_orders(self, token_id: str) -> bool:
+        """Check if we already have non-stale orders for a token."""
+        return any(
+            o.token_id == token_id and not o.is_stale
+            for o in self._active_orders.values()
+        )
+
+    async def _cancel_order(self, order_id: str):
+        """Cancel a single order and remove from tracking."""
+        success = await self.client.cancel_order(order_id)
+        if success:
+            self._active_orders.pop(order_id, None)
+        else:
+            self.logger.warning("Failed to cancel order %s", order_id)
+
+    async def _cancel_all_live_orders(self):
+        """Cancel all tracked orders."""
+        if not self._active_orders:
+            return
+
+        await self.client.cancel_all_orders()
+        count = len(self._active_orders)
+        self._active_orders.clear()
+        self.logger.info("Cancelled %d tracked orders", count)
+
+    # --- Fill handling: update inventory ---
+
+    def on_fill(self, order_id: str, filled_size: float, filled_price: float):
+        """Called when an order is filled. Updates inventory from actual fills.
+
+        This should be connected to the user WebSocket channel or
+        called by the engine after execution.
+        """
+        order = self._active_orders.pop(order_id, None)
+        if not order:
+            return
+
+        state = self.market_states.get(order.token_id)
+        if not state:
+            return
+
+        # Update inventory from actual fill
+        if order.side == "buy":
+            state.inventory += filled_size
+        else:
+            state.inventory -= filled_size
+
+        self.logger.info(
+            "Fill: %s %.1f %s @ %.4f → inventory: %.1f",
+            order.side, filled_size, state.outcome, filled_price, state.inventory,
+        )
+
+    def track_order(self, order_id: str, token_id: str, side: str,
+                    price: float, size: float, size_usd: float):
+        """Register an order for lifecycle tracking.
+
+        Called by the engine/router after placing an order.
+        """
+        if order_id.startswith("paper_"):
+            # In paper mode, simulate immediate fill → update inventory
+            state = self.market_states.get(token_id)
+            if state:
+                shares = size_usd / max(price, 0.01)
+                if side == "buy":
+                    state.inventory += shares
+                else:
+                    state.inventory -= shares
+            return
+
+        self._active_orders[order_id] = LiveOrder(
+            order_id=order_id,
+            token_id=token_id,
+            side=side,
+            price=price,
+            size=size,
+            size_usd=size_usd,
+            placed_at=time.time(),
+            ttl=self.order_ttl,
+        )
+
+    # --- Avellaneda-Stoikov model ---
+
     def _avellaneda_stoikov(self, book: OrderBook, state: MarketState) -> tuple[float | None, float | None]:
         """Calculate optimal bid/ask prices using Avellaneda-Stoikov model.
 
         reservation_price = mid - q * gamma * sigma^2 * T
         optimal_spread = gamma * sigma^2 * T + (2/gamma) * ln(1 + gamma/kappa)
-
-        Where:
-            q = inventory (positive = long)
-            gamma = risk aversion
-            sigma = volatility
-            T = time remaining (normalized)
         """
         mid = book.mid_price
         sigma = state.volatility

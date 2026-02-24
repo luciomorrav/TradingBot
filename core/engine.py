@@ -96,7 +96,7 @@ class Engine:
             await asyncio.sleep(runner.interval_seconds)
 
     async def _process_signal(self, sig: Signal):
-        """Execute signal → log → notify."""
+        """Execute signal → log → notify → update strategy."""
         if self.mode == "paper":
             await self._paper_execute(sig)
         elif self.execute_callback:
@@ -104,6 +104,7 @@ class Engine:
             if trade:
                 pnl = await self._record_trade(trade)
                 await self._notify_trade(trade, pnl)
+                self._notify_strategy_fill(sig, trade)
         else:
             logger.warning("No executor set, skipping signal: %s", sig)
 
@@ -138,6 +139,7 @@ class Engine:
 
         await self.risk_manager.record_trade(trade, filled=True, pnl=pnl)
         await self._notify_trade(trade, pnl)
+        self._notify_strategy_fill(sig, trade)
 
         if self.db_callback:
             await self.db_callback(trade, pnl)
@@ -147,6 +149,22 @@ class Engine:
         if self.db_callback:
             await self.db_callback(trade, pnl)
         return pnl
+
+    def _notify_strategy_fill(self, sig: Signal, trade):
+        """Notify the originating strategy about a fill (for inventory tracking)."""
+        runner = self.strategies.get(sig.strategy)
+        if runner and hasattr(runner.strategy, "track_order"):
+            runner.strategy.track_order(
+                order_id=trade.trade_id,
+                token_id=sig.metadata.get("token_id", sig.market_id),
+                side=sig.direction,
+                price=trade.price,
+                size=sig.metadata.get("shares", trade.size / max(trade.price, 0.01)),
+                size_usd=trade.size,
+            )
+        if runner and hasattr(runner.strategy, "on_fill"):
+            shares = sig.metadata.get("shares", trade.size / max(trade.price, 0.01))
+            runner.strategy.on_fill(trade.trade_id, shares, trade.price)
 
     async def _notify_trade(self, trade, pnl: float):
         if not self.notify_callback:

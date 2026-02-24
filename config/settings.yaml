@@ -4,8 +4,11 @@ general:
   log_level: INFO
 
 polymarket:
-  api_key: ${POLY_API_KEY}
-  chain_id: 137  # Polygon
+  private_key: ${POLY_PRIVATE_KEY}     # Ethereum/Polygon wallet private key (for EIP-712 signing)
+  api_key: ${POLY_API_KEY}             # CLOB API key (derived from private key)
+  api_secret: ${POLY_API_SECRET}       # CLOB API secret (derived from private key)
+  api_passphrase: ${POLY_API_PASSPHRASE}  # CLOB API passphrase (derived from private key)
+  chain_id: 137  # Polygon mainnet
   min_profit_threshold: 0.015  # 1.5% mínimo
   ws_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
   max_position_per_market: 100  # USD (ajustado a $500 capital)

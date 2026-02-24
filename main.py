@@ -14,6 +14,7 @@ from connectors.ib_client import IBClient
 from connectors.polymarket_client import PolymarketClient
 from connectors.telegram_bot import TelegramBot
 from core.engine import Engine
+from core.execution_router import ExecutionRouter
 from core.portfolio import Portfolio
 from core.risk_manager import RiskConfig, RiskManager
 from data.db import Database
@@ -78,6 +79,14 @@ async def main():
         ib_client=ib_client,
     )
     engine.add_strategy(pairs_trader, interval_seconds=30.0)
+
+    # --- Execution router (live mode only) ---
+    if mode == "live":
+        router = ExecutionRouter()
+        router.register("polymarket", poly_client)
+        router.register("ib", ib_client)
+        engine.set_executor(router.execute)
+        logger.info("Live execution router active (Polymarket + IB)")
 
     logger.info("Starting bot in %s mode with $%.0f capital", mode, capital)
 
