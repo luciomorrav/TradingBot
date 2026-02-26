@@ -202,6 +202,9 @@ class IBPairsTrader(BaseStrategy):
 
         if direction == "short_spread":
             # Short B (overpriced), Long A (underpriced)
+            # NOTE: position_side set here before fill confirmation.
+            # Safe in paper mode (instant fills). For live mode, refactor to
+            # set position_side only after both legs are confirmed filled.
             pair.position_side = "short_spread"
             pair.entry_zscore = pair.zscore
             pair.entry_time = time.time()
@@ -239,6 +242,7 @@ class IBPairsTrader(BaseStrategy):
             ]
         else:
             # Long B (underpriced), Short A (overpriced)
+            # NOTE: same as above — safe in paper, needs refactor for live.
             pair.position_side = "long_spread"
             pair.entry_zscore = pair.zscore
             pair.entry_time = time.time()
@@ -321,6 +325,8 @@ class IBPairsTrader(BaseStrategy):
                 ),
             ]
 
+        # NOTE: clearing position_side before fill confirmation.
+        # Safe in paper mode. For live mode, clear only after both close legs confirmed.
         pair.position_side = ""
         pair.entry_zscore = 0
         return signals

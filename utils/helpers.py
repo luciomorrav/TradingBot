@@ -19,6 +19,13 @@ _REQUIRED_ENV_VARS = {
     "TELEGRAM_CHAT_ID",
 }
 
+# Additional env vars required only in live mode (fail-fast before trading real money)
+_LIVE_REQUIRED_ENV_VARS = _REQUIRED_ENV_VARS | {
+    "POLY_PRIVATE_KEY",
+    "POLY_API_SECRET",
+    "POLY_API_PASSPHRASE",
+}
+
 
 def load_config(settings_path: str = "config/settings.yaml", env_path: str = "config/secrets.env") -> dict:
     """Load settings.yaml and resolve ${ENV_VAR} references from secrets.env."""
@@ -32,11 +39,15 @@ def load_config(settings_path: str = "config/settings.yaml", env_path: str = "co
 
     missing_vars: list[str] = []
 
+    # Determine required vars based on mode (peek at raw YAML for mode)
+    is_live = "mode: live" in raw or "--live" in sys.argv
+    required = _LIVE_REQUIRED_ENV_VARS if is_live else _REQUIRED_ENV_VARS
+
     def replacer(match):
         var = match.group(1)
         value = os.environ.get(var)
         if value is None:
-            if var in _REQUIRED_ENV_VARS:
+            if var in required:
                 missing_vars.append(var)
             return match.group(0)  # keep placeholder for optional vars
         return value

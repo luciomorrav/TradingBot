@@ -193,6 +193,46 @@ async def test_execution_degradation_blocks_trade(rm):
 # --- Daily reset ---
 
 def test_daily_reset(rm, portfolio):
-    portfolio._cash = 450  # simulate loss
+    portfolio.cash = 450  # simulate loss
     rm.reset_daily()
     assert rm.daily_start_equity == portfolio.equity
+    assert rm.daily_start_equity == 450  # verify cash change took effect
+
+
+# --- Portfolio netting (opposite side = close) ---
+
+@pytest.mark.asyncio
+async def test_portfolio_netting_opposite_side_closes(portfolio):
+    """Buying then selling same market should reduce position, not double it."""
+    buy = _make_trade(strategy="mm", price=0.40, size=20, side="buy")
+    buy.market_id = "token_123"
+    await portfolio.open_position(buy)
+
+    assert len(portfolio.positions) == 1
+    pos_key = list(portfolio.positions.keys())[0]
+    assert portfolio.positions[pos_key].size == 20
+
+    # Sell same market — should close, not add
+    sell = _make_trade(strategy="mm", price=0.50, size=20, side="sell")
+    sell.market_id = "token_123"
+    pnl = await portfolio.close_position(sell)
+
+    assert pnl > 0  # bought at 0.40, sold at 0.50
+    assert len(portfolio.positions) == 0  # fully closed
+
+
+@pytest.mark.asyncio
+async def test_portfolio_netting_partial_close(portfolio):
+    """Selling less than position size should reduce, not close entirely."""
+    buy = _make_trade(strategy="mm", price=0.40, size=40, side="buy")
+    buy.market_id = "token_123"
+    await portfolio.open_position(buy)
+
+    sell = _make_trade(strategy="mm", price=0.50, size=15, side="sell")
+    sell.market_id = "token_123"
+    pnl = await portfolio.close_position(sell)
+
+    assert pnl > 0
+    assert len(portfolio.positions) == 1
+    remaining = list(portfolio.positions.values())[0]
+    assert remaining.size == 25  # 40 - 15

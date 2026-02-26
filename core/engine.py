@@ -102,7 +102,21 @@ class Engine:
         elif self.execute_callback:
             trade = await self.execute_callback(sig)
             if trade:
-                pnl = await self._record_trade(trade)
+                # Update portfolio (detect close by opposite-side position)
+                should_close = sig.metadata.get("close", False)
+                if not should_close:
+                    pos_key = self.portfolio._position_key(trade.platform, trade.market_id, trade.strategy)
+                    existing = self.portfolio.positions.get(pos_key)
+                    if existing and existing.side != trade.side:
+                        should_close = True
+
+                if should_close:
+                    pnl = await self.portfolio.close_position(trade)
+                else:
+                    await self.portfolio.open_position(trade)
+                    pnl = 0.0
+
+                await self._record_trade(trade, pnl=pnl)
                 await self._notify_trade(trade, pnl)
                 self._notify_strategy_fill(sig, trade)
         else:
@@ -132,7 +146,16 @@ class Engine:
             trade.platform = Platform(sig.metadata["platform"])
 
         pnl = 0.0
-        if sig.metadata.get("close"):
+        should_close = sig.metadata.get("close", False)
+
+        # Auto-detect close: if existing position has opposite side, close it
+        if not should_close:
+            pos_key = self.portfolio._position_key(trade.platform, trade.market_id, trade.strategy)
+            existing = self.portfolio.positions.get(pos_key)
+            if existing and existing.side != trade.side:
+                should_close = True
+
+        if should_close:
             pnl = await self.portfolio.close_position(trade)
         else:
             await self.portfolio.open_position(trade)

@@ -67,8 +67,11 @@ class ExecutionRouter:
                 logger.warning("Order too small: %.2f shares", shares)
                 return None
 
+            # Use token_id from metadata (market_id != token_id in Polymarket)
+            token_id = sig.metadata.get("token_id", sig.market_id)
+
             result = await client.place_order(
-                token_id=sig.market_id,
+                token_id=token_id,
                 side=side,
                 price=sig.price,
                 size=shares,
@@ -79,6 +82,13 @@ class ExecutionRouter:
 
             latency = (time.time() - start) * 1000
             status = result.get("status", "")
+
+            # WARN: treating order post as fill — real fills come via user WS
+            if status not in ("paper",):
+                logger.warning(
+                    "Live order treated as immediate fill (no user WS reconciliation yet). "
+                    "Order ID: %s", result.get("order_id", "?"),
+                )
 
             # Determine fee from market data or default
             fee = sig.metadata.get("fee", 0.0)
