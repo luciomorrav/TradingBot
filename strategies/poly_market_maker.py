@@ -172,8 +172,13 @@ class PolyMarketMaker(BaseStrategy):
             shares_bid = size / max(bid_price, 0.01)
             shares_ask = size / max(ask_price, 0.01)  # shares = usd / price
 
+            # Inventory in USD — max_inventory is a USD cap, not a shares cap.
+            # Using shares directly would block cheap tokens (e.g. 0.04) after 1 fill
+            # while allowing 5-6 fills on expensive tokens (e.g. 0.96), breaking neutrality.
+            inventory_usd = state.inventory * book.mid_price
+
             # Bid signal (buy YES) — only if inventory allows
-            if bid_price > 0.01 and state.inventory < self.max_inventory:
+            if bid_price > 0.01 and inventory_usd < self.max_inventory:
                 signals.append(Signal(
                     strategy=self.name,
                     market_id=state.market_id,
@@ -191,7 +196,7 @@ class PolyMarketMaker(BaseStrategy):
                 ))
 
             # Ask signal (sell YES) — only if inventory allows
-            if ask_price < 0.99 and state.inventory > -self.max_inventory:
+            if ask_price < 0.99 and inventory_usd > -self.max_inventory:
                 signals.append(Signal(
                     strategy=self.name,
                     market_id=state.market_id,
