@@ -1,0 +1,34 @@
+[Unit]
+Description=Trading Bot (Polymarket + IB)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botuser
+Group=botuser
+WorkingDirectory=/opt/tradingbot
+ExecStart=/opt/tradingbot/venv/bin/python main.py
+Restart=always
+RestartSec=10
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/tradingbot/logs /opt/tradingbot/data
+ProtectHome=yes
+PrivateTmp=yes
+
+# Logging (goes to journalctl + bot's own log files)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tradingbot
+
+# Kill timeout (give graceful shutdown time to cancel orders)
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
