@@ -2,10 +2,8 @@
 # Trading Bot — VPS Setup Script
 # Run as root on a fresh Ubuntu 22.04/24.04 server
 #
-# Usage:
-#   curl -sSL https://raw.githubusercontent.com/luciomorrav/TradingBot/main/deploy/setup.sh | bash
-#   — or —
-#   scp setup.sh root@YOUR_VPS_IP:~ && ssh root@YOUR_VPS_IP 'bash setup.sh'
+# Usage (recommended — verify the script before running):
+#   scp deploy/setup.sh root@YOUR_VPS_IP:~ && ssh root@YOUR_VPS_IP 'bash setup.sh'
 
 set -euo pipefail
 
