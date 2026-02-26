@@ -140,8 +140,9 @@ class PolyMarketMaker(BaseStrategy):
             state.mid_prices.append(book.mid_price)
             state.last_mid = book.mid_price
 
-            # Skip if we just quoted
-            if now - state.last_quote_time < 3:
+            # Cooldown: one fill per ~30s simulates realistic order lifecycle
+            # (quotes stay up for TTL seconds, one side fills, then repost)
+            if now - state.last_quote_time < 30:
                 continue
 
             # Skip if we already have live orders for this token
@@ -175,30 +176,13 @@ class PolyMarketMaker(BaseStrategy):
             shares_ask = size / max(ask_price, 0.01)  # shares = usd / price
 
             # Inventory in USD — max_inventory is a USD cap, not a shares cap.
-            # Using shares directly would block cheap tokens (e.g. 0.04) after 1 fill
-            # while allowing 5-6 fills on expensive tokens (e.g. 0.96), breaking neutrality.
             inventory_usd = state.inventory * book.mid_price
 
-            # Bid signal (buy YES) — only if inventory allows
-            if bid_price > 0.01 and inventory_usd < self.max_inventory:
-                signals.append(Signal(
-                    strategy=self.name,
-                    market_id=state.market_id,
-                    symbol=f"{state.outcome}",
-                    direction="buy",
-                    size_usd=size,
-                    price=bid_price,
-                    confidence=0.6,
-                    metadata={
-                        "platform": "polymarket",
-                        "token_id": tid,
-                        "shares": shares_bid,
-                        "fee": state.fee_rate * size,
-                    },
-                ))
-
-            # Ask signal (sell YES) — only if inventory allows
-            if ask_price < 0.99 and inventory_usd > -self.max_inventory:
+            # Only ONE side fills per cycle.  In reality both quotes are posted
+            # as limit orders but only one gets hit before the MM reposts.
+            # Paper mode fills instantly, so we pick the side that keeps
+            # inventory neutral: long → SELL to reduce, flat/short → BUY.
+            if state.inventory > 0 and ask_price < 0.99 and inventory_usd > -self.max_inventory:
                 signals.append(Signal(
                     strategy=self.name,
                     market_id=state.market_id,
@@ -211,6 +195,22 @@ class PolyMarketMaker(BaseStrategy):
                         "platform": "polymarket",
                         "token_id": tid,
                         "shares": shares_ask,
+                        "fee": state.fee_rate * size,
+                    },
+                ))
+            elif bid_price > 0.01 and inventory_usd < self.max_inventory:
+                signals.append(Signal(
+                    strategy=self.name,
+                    market_id=state.market_id,
+                    symbol=f"{state.outcome}",
+                    direction="buy",
+                    size_usd=size,
+                    price=bid_price,
+                    confidence=0.6,
+                    metadata={
+                        "platform": "polymarket",
+                        "token_id": tid,
+                        "shares": shares_bid,
                         "fee": state.fee_rate * size,
                     },
                 ))
