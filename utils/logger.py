@@ -18,8 +18,14 @@ def setup_logging(level: str = "INFO", log_dir: str = "logs"):
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Console handler
-    console = logging.StreamHandler(sys.stdout)
+    # Console handler (force UTF-8 on Windows to support emojis)
+    if sys.platform == "win32":
+        import io
+        console = logging.StreamHandler(
+            io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        )
+    else:
+        console = logging.StreamHandler(sys.stdout)
     console.setFormatter(fmt)
     root.addHandler(console)
 
@@ -36,3 +42,8 @@ def setup_logging(level: str = "INFO", log_dir: str = "logs"):
     # Quiet noisy libraries
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.WARNING)
+    logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+    logging.getLogger("rlp").setLevel(logging.WARNING)

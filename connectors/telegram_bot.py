@@ -62,7 +62,7 @@ class TelegramBot:
             return
         try:
             await self._app.bot.send_message(
-                chat_id=self.chat_id, text=text, parse_mode="HTML",
+                chat_id=self.chat_id, text=text,
             )
         except Exception:
             logger.exception("Failed to send Telegram message")

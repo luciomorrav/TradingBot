@@ -69,12 +69,15 @@ class PolyMarketMaker(BaseStrategy):
         self.client = poly_client
         self.mm_config = config.get("market_maker", {})
 
-        self.target_spread = self.mm_config.get("target_spread", 0.05)
+        self.target_spread = self.mm_config.get("target_spread", 0.02)
         self.max_inventory = self.mm_config.get("max_inventory", 200)
         self.repost_threshold = self.mm_config.get("repost_threshold", 0.02)
         self.max_position_per_market = config.get("max_position_per_market", 100)
         self.informed_flow_threshold = 500  # USD
         self.order_ttl = self.mm_config.get("order_ttl", 60.0)  # seconds
+        self.min_volume = self.mm_config.get("min_volume", 200)
+        self.max_volume = self.mm_config.get("max_volume", 10000)
+        self.max_markets = self.mm_config.get("max_markets", 8)
 
         # Avellaneda-Stoikov parameters
         self.gamma = 0.1  # risk aversion (higher = wider spreads)
@@ -118,6 +121,11 @@ class PolyMarketMaker(BaseStrategy):
 
         # First: cancel stale orders and repost if market moved
         await self._manage_order_lifecycle()
+
+        books_received = sum(1 for tid in self.market_states if self.client.get_order_book(tid))
+        if books_received == 0 and self.market_states:
+            self.logger.info("Waiting for orderbooks (%d tokens subscribed)", len(self.market_states))
+            return signals
 
         for tid, state in self.market_states.items():
             book = self.client.get_order_book(tid)
@@ -199,6 +207,11 @@ class PolyMarketMaker(BaseStrategy):
                 ))
 
             state.last_quote_time = now
+
+        if signals:
+            self.logger.info("Generated %d signals this cycle", len(signals))
+            for sig in signals[:4]:
+                self.logger.info("  %s %s $%.1f @ %.4f", sig.direction, sig.symbol, sig.size_usd, sig.price)
 
         return signals
 
@@ -355,19 +368,18 @@ class PolyMarketMaker(BaseStrategy):
         return top_bid_size > self.informed_flow_threshold or top_ask_size > self.informed_flow_threshold
 
     def _select_markets(self, markets: list[Market]) -> list[Market]:
-        """Select niche markets suitable for market making.
-
-        Criteria: volume $500-5000/day, active, has tokens.
-        """
+        """Select niche markets suitable for market making."""
         selected = []
         for m in markets:
             if not m.active or not m.tokens:
                 continue
-            if 500 <= m.volume <= 5000:
+            if self.min_volume <= m.volume <= self.max_volume:
                 selected.append(m)
         selected.sort(key=lambda m: m.liquidity)  # prefer lower liquidity (less competition)
-        max_markets = 5  # don't spread too thin with $500
-        return selected[:max_markets]
+        result = selected[:self.max_markets]
+        for m in result:
+            self.logger.info("  Selected: %s (vol=$%.0f, liq=$%.0f)", m.question[:60], m.volume, m.liquidity)
+        return result
 
     async def _on_book_update(self, token_id: str, book: OrderBook):
         """Handle real-time book updates from WebSocket."""

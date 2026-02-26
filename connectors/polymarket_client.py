@@ -89,10 +89,14 @@ class PolymarketClient:
 
     def __init__(self, config: dict):
         self.config = config
-        self._api_key = config.get("api_key", "")
-        self._api_secret = config.get("api_secret", "")
-        self._api_passphrase = config.get("api_passphrase", "")
-        self._private_key = config.get("private_key", "")
+        self._api_key = str(config.get("api_key", ""))
+        self._api_secret = str(config.get("api_secret", ""))
+        self._api_passphrase = str(config.get("api_passphrase", ""))
+        # YAML parses 0x... as hex int, so force to string and restore 0x prefix
+        pk = config.get("private_key", "")
+        if isinstance(pk, int):
+            pk = hex(pk)
+        self._private_key = str(pk)
         self._chain_id = config.get("chain_id", 137)
 
         # py-clob-client for live order signing (initialized in connect() if creds present)
@@ -193,6 +197,13 @@ class PolymarketClient:
                 outcomes = m.get("outcomes", [])
                 prices = m.get("outcomePrices", [])
                 clob_ids = m.get("clobTokenIds", [])
+                # Gamma API returns these as JSON strings, not lists
+                if isinstance(outcomes, str):
+                    outcomes = json.loads(outcomes)
+                if isinstance(prices, str):
+                    prices = json.loads(prices)
+                if isinstance(clob_ids, str):
+                    clob_ids = json.loads(clob_ids)
                 for i, outcome in enumerate(outcomes):
                     if i < len(clob_ids):
                         tokens.append({

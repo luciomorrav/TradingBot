@@ -1,6 +1,6 @@
 general:
   mode: paper  # paper | live
-  capital_usd: 500
+  capital_usd: 340
   log_level: INFO
 
 polymarket:
@@ -11,11 +11,14 @@ polymarket:
   chain_id: 137  # Polygon mainnet
   min_profit_threshold: 0.015  # 1.5% mínimo
   ws_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
-  max_position_per_market: 100  # USD (ajustado a $500 capital)
+  max_position_per_market: 70  # USD (~20% de $340 capital)
   market_maker:
-    target_spread: 0.05
-    max_inventory: 200  # USD por mercado
+    target_spread: 0.02  # 2c min spread (was 5c — too tight for these markets)
+    max_inventory: 120  # USD por mercado (~35% de capital)
     repost_threshold: 0.02  # repostear si mercado mueve > 2c
+    min_volume: 200       # broader range to find more opportunities
+    max_volume: 10000
+    max_markets: 8
 
 ib:
   host: 127.0.0.1
