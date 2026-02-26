@@ -19,6 +19,7 @@ polymarket:
     min_volume: 200       # broader range to find more opportunities
     max_volume: 10000
     max_markets: 8
+    min_liquidity: 50     # USD — skip markets with empty books (liq=$0)
 
 ib:
   host: 127.0.0.1

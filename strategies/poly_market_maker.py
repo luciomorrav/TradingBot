@@ -78,6 +78,7 @@ class PolyMarketMaker(BaseStrategy):
         self.min_volume = self.mm_config.get("min_volume", 200)
         self.max_volume = self.mm_config.get("max_volume", 10000)
         self.max_markets = self.mm_config.get("max_markets", 8)
+        self.min_liquidity = self.mm_config.get("min_liquidity", 50)  # USD — skip empty books
 
         # Avellaneda-Stoikov parameters
         self.gamma = 0.1  # risk aversion (higher = wider spreads)
@@ -374,7 +375,8 @@ class PolyMarketMaker(BaseStrategy):
             if not m.active or not m.tokens:
                 continue
             if self.min_volume <= m.volume <= self.max_volume:
-                selected.append(m)
+                if m.liquidity >= self.min_liquidity:
+                    selected.append(m)
         selected.sort(key=lambda m: m.liquidity)  # prefer lower liquidity (less competition)
         result = selected[:self.max_markets]
         for m in result:

@@ -188,7 +188,10 @@ class Engine:
                 size=sig.metadata.get("shares", trade.size / max(trade.price, 0.01)),
                 size_usd=trade.size,
             )
-        if runner and hasattr(runner.strategy, "on_fill"):
+        # In paper mode: simulate immediate fill.
+        # In live mode: on_fill must be called by the user WebSocket handler when a
+        # confirmed fill arrives — NOT here, to avoid treating a posted order as filled.
+        if self.mode == "paper" and runner and hasattr(runner.strategy, "on_fill"):
             shares = sig.metadata.get("shares", trade.size / max(trade.price, 0.01))
             runner.strategy.on_fill(trade.trade_id, shares, trade.price)
 
