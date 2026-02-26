@@ -164,25 +164,18 @@ class PolyMarketMaker(BaseStrategy):
             if bid_price is None:
                 continue
 
-            # Calculate order size
-            base_size = min(self.max_position_per_market * 0.3, 50)  # conservative with $500
-            size = self.risk_manager.suggest_position_size(
-                self.name, base_size, volatility=state.volatility,
-            )
-            if size < 1:
-                continue
-
-            shares_bid = size / max(bid_price, 0.01)
-            shares_ask = size / max(ask_price, 0.01)  # shares = usd / price
-
             # Inventory in USD — max_inventory is a USD cap, not a shares cap.
             inventory_usd = state.inventory * book.mid_price
+            base_size = min(self.max_position_per_market * 0.3, 50)
 
             # Only ONE side fills per cycle.  In reality both quotes are posted
             # as limit orders but only one gets hit before the MM reposts.
             # Paper mode fills instantly, so we pick the side that keeps
             # inventory neutral: long → SELL to reduce, flat/short → BUY.
             if state.inventory > 0 and ask_price < 0.99 and inventory_usd > -self.max_inventory:
+                # SELL to reduce inventory — always allowed (reduces exposure)
+                size = base_size
+                shares_ask = size / max(ask_price, 0.01)
                 signals.append(Signal(
                     strategy=self.name,
                     market_id=state.market_id,
@@ -199,6 +192,13 @@ class PolyMarketMaker(BaseStrategy):
                     },
                 ))
             elif bid_price > 0.01 and inventory_usd < self.max_inventory:
+                # BUY — subject to risk limits (increases exposure)
+                size = self.risk_manager.suggest_position_size(
+                    self.name, base_size, volatility=state.volatility,
+                )
+                if size < 1:
+                    continue
+                shares_bid = size / max(bid_price, 0.01)
                 signals.append(Signal(
                     strategy=self.name,
                     market_id=state.market_id,
