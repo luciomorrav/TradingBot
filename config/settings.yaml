@@ -20,6 +20,15 @@ polymarket:
     max_volume: 10000
     max_markets: 8
     min_liquidity: 50     # USD — skip markets with empty books (liq=$0)
+    scoring:
+      depth_target: 500      # USD — ideal book depth for low slippage
+      volume_target: 2000    # USD — ideal daily volume for fast fills
+      weights:
+        spread: 0.35         # spread potential (50/50 markets = wider spreads)
+        depth: 0.20          # book depth
+        volume: 0.20         # daily volume
+        mid_price: 0.15      # price balance (prefer 0.2-0.8 range)
+        expiry: 0.10         # time to expiry (prefer >7 days)
 
 ib:
   host: 127.0.0.1

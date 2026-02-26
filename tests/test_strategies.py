@@ -264,3 +264,109 @@ def test_on_fill_updates_inventory():
     mm.on_fill("0xabc123", filled_size=100, filled_price=0.50)
     assert mm.market_states["t1"].inventory == 100.0
     assert "0xabc123" not in mm._active_orders  # removed after fill
+
+
+# --- Market selection scoring ---
+
+def _make_mm():
+    """Helper: create a PolyMarketMaker for scoring tests."""
+    from strategies.poly_market_maker import PolyMarketMaker
+    from core.portfolio import Portfolio
+    from core.risk_manager import RiskConfig, RiskManager
+    from unittest.mock import MagicMock
+
+    portfolio = Portfolio(capital_usd=500)
+    rm = RiskManager(portfolio, RiskConfig())
+    client = MagicMock()
+    return PolyMarketMaker("test", portfolio, rm, {"market_maker": {}}, client)
+
+
+def _make_market(mid=0.5, volume=2000, liquidity=500, end_date="2026-06-01T00:00:00Z", **kw):
+    """Helper: create a Market with controllable params."""
+    from connectors.polymarket_client import Market
+    return Market(
+        id=kw.get("id", "m1"),
+        question=kw.get("question", "Test market?"),
+        slug="test-market",
+        active=kw.get("active", True),
+        end_date=end_date,
+        tokens=[
+            {"token_id": "t1", "outcome": "Yes", "price": mid},
+            {"token_id": "t2", "outcome": "No", "price": round(1 - mid, 4)},
+        ],
+        volume=volume,
+        liquidity=liquidity,
+        fee=kw.get("fee", 0.02),
+    )
+
+
+def test_score_market_balanced():
+    """A balanced 50/50 market with good volume/liq should score high."""
+    mm = _make_mm()
+    m = _make_market(mid=0.50, volume=2000, liquidity=500)
+    score = mm._score_market(m)
+    assert score > 0.7, f"Balanced market score {score} should be > 0.7"
+
+
+def test_score_market_extreme_price():
+    """A 95/5 market should score much lower than a 50/50."""
+    mm = _make_mm()
+    m_extreme = _make_market(mid=0.95, volume=2000, liquidity=500)
+    m_balanced = _make_market(mid=0.50, volume=2000, liquidity=500)
+    score_extreme = mm._score_market(m_extreme)
+    score_balanced = mm._score_market(m_balanced)
+    assert score_extreme < score_balanced, "Extreme-price market should score lower"
+    assert score_extreme < 0.6, f"Extreme-price score {score_extreme} should be < 0.6"
+
+
+def test_select_markets_ordering():
+    """Markets should be selected in descending score order, limited to max_markets."""
+    mm = _make_mm()
+    mm.max_markets = 3
+    markets = [
+        _make_market(mid=0.50, volume=2000, liquidity=500, id="best", question="Balanced?"),
+        _make_market(mid=0.90, volume=500, liquidity=100, id="worst", question="Extreme low vol?"),
+        _make_market(mid=0.45, volume=1500, liquidity=400, id="good", question="Slightly off?"),
+        _make_market(mid=0.30, volume=800, liquidity=200, id="ok", question="Off-center?"),
+        _make_market(mid=0.10, volume=300, liquidity=60, id="bad", question="Very skewed?"),
+    ]
+    selected = mm._select_markets(markets)
+    assert len(selected) == 3
+    ids = [m.id for m in selected]
+    assert ids[0] == "best", f"Best market should be first, got {ids}"
+    # Worst/bad should not be in top 3
+    assert "worst" not in ids
+    assert "bad" not in ids
+
+
+@pytest.mark.asyncio
+async def test_validate_markets_drops_tight_spread():
+    """Markets with spread < min should be dropped during post-WS validation."""
+    from connectors.polymarket_client import OrderBook, OrderBookLevel
+    from strategies.poly_market_maker import MarketState
+    from unittest.mock import MagicMock, AsyncMock
+
+    mm = _make_mm()
+    mm.client.subscribe_market = AsyncMock()
+
+    # Set up two tokens: one with wide spread, one with tight spread
+    mm.market_states["t_wide"] = MarketState(token_id="t_wide", market_id="m1", outcome="Wide")
+    mm.market_states["t_tight"] = MarketState(token_id="t_tight", market_id="m2", outcome="Tight")
+
+    def mock_book(tid):
+        if tid == "t_wide":
+            return OrderBook("m1", "t_wide",
+                             bids=[OrderBookLevel(0.44, 100)],
+                             asks=[OrderBookLevel(0.56, 100)])  # spread 0.12
+        elif tid == "t_tight":
+            return OrderBook("m2", "t_tight",
+                             bids=[OrderBookLevel(0.495, 100)],
+                             asks=[OrderBookLevel(0.500, 100)])  # spread 0.005
+        return None
+
+    mm.client.get_order_book = mock_book
+
+    await mm._validate_markets()
+
+    assert "t_wide" in mm.market_states, "Wide-spread market should remain"
+    assert "t_tight" not in mm.market_states, "Tight-spread market should be dropped"

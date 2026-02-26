@@ -9,6 +9,7 @@ Quotes both sides of prediction markets with:
 """
 from __future__ import annotations
 
+import asyncio
 import math
 import time
 from collections import deque
@@ -128,6 +129,9 @@ class PolyMarketMaker(BaseStrategy):
         self.client.on_book_update(self._on_book_update)
         await self.client.subscribe_market(token_ids)
         self.logger.info("Market maker active on %d tokens across %d markets", len(token_ids), len(selected))
+
+        # Validate real spreads after orderbooks arrive (~60s)
+        asyncio.create_task(self._delayed_validation())
 
     async def on_stop(self):
         # Cancel all live orders before stopping
@@ -408,22 +412,126 @@ class PolyMarketMaker(BaseStrategy):
         except (ValueError, AttributeError):
             return False
 
+    @staticmethod
+    def _hours_to_expiry(end_date: str) -> float:
+        """Return hours until market expiry, or 0 if unparseable/past."""
+        if not end_date:
+            return 0.0
+        try:
+            dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            delta = dt - datetime.now(timezone.utc)
+            return max(delta.total_seconds() / 3600, 0.0)
+        except (ValueError, AttributeError):
+            return 0.0
+
+    def _score_market(self, market: Market) -> float:
+        """Score a market 0-1 for MM suitability.
+
+        Weighted factors: spread potential (35%), depth (20%), volume (20%),
+        mid-price balance (15%), time to expiry (10%).
+        """
+        cfg = self.mm_config.get("scoring", {})
+
+        # Best token balance — for binary markets avg(yes+no) always = 0.5,
+        # so we look at how close the best individual token is to 0.5
+        prices = [t.get("price", 0.5) for t in market.tokens if t.get("price")]
+        best_balance = min((abs(p - 0.5) for p in prices), default=0.0) if prices else 0.0
+
+        # 1. Spread potential — markets near 50/50 have wider natural spreads
+        #    Already 0-1: 1.0 at 50/50, 0.1 at 95/5
+        spread_potential = 1.0 - 2 * best_balance
+
+        # 2. Depth — more liquidity = less slippage
+        depth_target = cfg.get("depth_target", 500)
+        depth_score = min(market.liquidity / max(depth_target, 1), 1.0)
+
+        # 3. Volume — more volume = faster fills
+        volume_target = cfg.get("volume_target", 2000)
+        volume_score = min(market.volume / max(volume_target, 1), 1.0)
+
+        # 4. Mid price range — prefer tokens near 0.2-0.8 (more two-way flow)
+        mid_price_score = 1.0 - 2 * best_balance
+
+        # 5. Time to expiry — prefer > 7 days remaining
+        hours = self._hours_to_expiry(market.end_date)
+        expiry_score = min(hours / 168, 1.0) if hours > 0 else 0.5
+
+        w = cfg.get("weights", {})
+        score = (
+            w.get("spread", 0.35) * spread_potential
+            + w.get("depth", 0.20) * depth_score
+            + w.get("volume", 0.20) * volume_score
+            + w.get("mid_price", 0.15) * mid_price_score
+            + w.get("expiry", 0.10) * expiry_score
+        )
+        return round(score, 4)
+
     def _select_markets(self, markets: list[Market]) -> list[Market]:
-        """Select niche markets suitable for market making."""
-        selected = []
+        """Select markets with highest MM suitability score."""
+        candidates = []
         for m in markets:
             if not m.active or not m.tokens:
                 continue
             if self._market_is_expired(m.end_date):
                 continue
-            if self.min_volume <= m.volume <= self.max_volume:
-                if m.liquidity >= self.min_liquidity:
-                    selected.append(m)
-        selected.sort(key=lambda m: m.liquidity)  # prefer lower liquidity (less competition)
-        result = selected[:self.max_markets]
-        for m in result:
-            self.logger.info("  Selected: %s (vol=$%.0f, liq=$%.0f)", m.question[:60], m.volume, m.liquidity)
+            if not (self.min_volume <= m.volume <= self.max_volume):
+                continue
+            if m.liquidity < self.min_liquidity:
+                continue
+            score = self._score_market(m)
+            candidates.append((score, m))
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        # Keep backup candidates for post-WS validation replacement
+        self._backup_candidates = [m for _, m in candidates[self.max_markets:self.max_markets * 2]]
+
+        result = [m for _, m in candidates[:self.max_markets]]
+        for score, m in candidates[:self.max_markets]:
+            self.logger.info("  Selected: %s (score=%.3f, vol=$%.0f, liq=$%.0f)",
+                             m.question[:50], score, m.volume, m.liquidity)
         return result
+
+    async def _delayed_validation(self):
+        """Wait for orderbooks to arrive, then validate real spreads."""
+        await asyncio.sleep(60)
+        await self._validate_markets()
+
+    async def _validate_markets(self):
+        """Post-WS validation: drop markets with tight real spreads, replace with backups."""
+        min_spread = max(self.target_spread, 0.02)
+        to_remove = []
+
+        for tid, state in list(self.market_states.items()):
+            book = self.client.get_order_book(tid)
+            if not book:
+                continue
+            if book.spread < min_spread:
+                self.logger.info("Dropping %s: real spread %.4f < min %.4f",
+                                 state.outcome, book.spread, min_spread)
+                to_remove.append(tid)
+
+        for tid in to_remove:
+            del self.market_states[tid]
+
+        if to_remove and hasattr(self, '_backup_candidates') and self._backup_candidates:
+            replacements = self._backup_candidates[:len(to_remove)]
+            self._backup_candidates = self._backup_candidates[len(to_remove):]
+            new_token_ids = []
+            for market in replacements:
+                for token in market.tokens:
+                    tid = token["token_id"]
+                    new_token_ids.append(tid)
+                    self.market_states[tid] = MarketState(
+                        token_id=tid, market_id=market.id,
+                        outcome=token.get("outcome", ""), fee_rate=market.fee,
+                    )
+            if new_token_ids:
+                await self.client.subscribe_market(new_token_ids)
+                self.logger.info("Replaced %d tokens with backups", len(new_token_ids))
+
+        active = len(self.market_states)
+        self.logger.info("Post-WS validation: %d tokens dropped, %d active", len(to_remove), active)
 
     async def _on_book_update(self, token_id: str, book: OrderBook):
         """Handle real-time book updates from WebSocket."""
