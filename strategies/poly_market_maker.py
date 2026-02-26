@@ -90,6 +90,21 @@ class PolyMarketMaker(BaseStrategy):
         self.market_states: dict[str, MarketState] = {}  # token_id -> state
         self._active_orders: dict[str, LiveOrder] = {}    # order_id -> LiveOrder
 
+    async def run_cycle(self) -> list[Signal]:
+        """Override base class — MM manages its own risk inside evaluate().
+
+        The base run_cycle applies suggest_position_size + check_can_trade to
+        every signal, which blocks SELLs when exposure is high.  But SELLs
+        *reduce* exposure, so they must not be filtered by the exposure cap.
+        """
+        if not self.enabled:
+            return []
+        try:
+            return await self.evaluate()
+        except Exception:
+            self.logger.exception("Error in evaluate cycle")
+            return []
+
     async def on_start(self):
         self.logger.info("Market maker starting — selecting markets...")
         markets = await self.client.fetch_active_markets()
