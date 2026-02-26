@@ -186,11 +186,15 @@ class PolyMarketMaker(BaseStrategy):
             # Only ONE side fills per cycle.  In reality both quotes are posted
             # as limit orders but only one gets hit before the MM reposts.
             # Paper mode fills instantly, so we pick the side that keeps
-            # inventory neutral: long → SELL to reduce, flat/short → BUY.
-            if state.inventory > 0 and ask_price < 0.99 and inventory_usd > -self.max_inventory:
-                # SELL to reduce inventory — always allowed (reduces exposure)
-                size = base_size
-                shares_ask = size / max(ask_price, 0.01)
+            # inventory neutral: significant long → SELL to reduce, else → BUY.
+            sell_threshold = base_size * 0.3  # ~$6 dead zone — ignore dust
+            if inventory_usd > sell_threshold and ask_price < 0.99:
+                # SELL to reduce inventory — cap at what we hold (never go short)
+                max_shares = base_size / max(ask_price, 0.01)
+                shares_ask = min(max_shares, state.inventory)
+                size = shares_ask * ask_price
+                if size < 1:
+                    continue
                 signals.append(Signal(
                     strategy=self.name,
                     market_id=state.market_id,
