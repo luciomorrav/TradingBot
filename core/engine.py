@@ -128,10 +128,13 @@ class Engine:
         import time
         import uuid
 
+        # For Polymarket use token_id as position key so each token tracks separately
+        position_market_id = sig.metadata.get("token_id", sig.market_id)
+
         trade = Trade(
             trade_id=str(uuid.uuid4())[:8],
             platform=Platform.POLYMARKET,  # default, overridden by strategy metadata
-            market_id=sig.market_id,
+            market_id=position_market_id,
             symbol=sig.symbol,
             side=Side.BUY if sig.direction == "buy" else Side.SELL,
             price=sig.price,

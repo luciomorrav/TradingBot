@@ -15,7 +15,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from connectors.polymarket_client import OrderBook, Market, PolymarketClient
-from core.portfolio import Platform, Portfolio, Side
+from core.portfolio import Platform, Portfolio, Side, Trade
 from core.risk_manager import RiskManager
 from strategies.base_strategy import BaseStrategy, Signal
 
@@ -386,6 +386,10 @@ class PolyMarketMaker(BaseStrategy):
         state = self.market_states.get(token_id)
         if not state:
             return
+
+        # Update portfolio mark-to-market so unrealized PnL is accurate
+        await self.portfolio.update_price(Platform.POLYMARKET, token_id, self.name, book.mid_price)
+
         # Check if we need to repost (market moved beyond threshold)
         if state.last_mid > 0 and abs(book.mid_price - state.last_mid) > self.repost_threshold:
             self.logger.debug(

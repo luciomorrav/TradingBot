@@ -96,7 +96,7 @@ class ExecutionRouter:
             trade = Trade(
                 trade_id=result.get("order_id", str(uuid.uuid4())[:8]),
                 platform=Platform.POLYMARKET,
-                market_id=sig.market_id,
+                market_id=token_id,  # use token_id so each token has its own position
                 symbol=sig.symbol,
                 side=Side.BUY if sig.direction == "buy" else Side.SELL,
                 price=sig.price,
