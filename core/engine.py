@@ -139,7 +139,7 @@ class Engine:
             side=Side.BUY if sig.direction == "buy" else Side.SELL,
             price=sig.price,
             size=sig.size_usd,
-            fee=0.0,  # paper mode, no fees
+            fee=sig.metadata.get("fee") or sig.size_usd * 0.02,  # use strategy fee, or 2% if zero/missing
             slippage=0.0,
             strategy=sig.strategy,
             timestamp=time.time(),
