@@ -168,7 +168,7 @@ class PolyMarketMaker(BaseStrategy):
                 continue
 
             shares_bid = size / max(bid_price, 0.01)
-            shares_ask = size / max(1 - ask_price, 0.01)
+            shares_ask = size / max(ask_price, 0.01)  # shares = usd / price
 
             # Bid signal (buy YES) — only if inventory allows
             if bid_price > 0.01 and state.inventory < self.max_inventory:
@@ -330,8 +330,8 @@ class PolyMarketMaker(BaseStrategy):
         sigma = state.volatility
         q = state.inventory / max(self.max_inventory, 1)  # normalize to [-1, 1]
 
-        # Clamp mid to valid range
-        if mid <= 0.02 or mid >= 0.98:
+        # Clamp mid to valid range — exclude near-resolution markets (>95% resolved)
+        if mid <= 0.05 or mid >= 0.95:
             return None, None
 
         # Time factor (assume 1.0 for continuous markets)
