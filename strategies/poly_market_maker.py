@@ -81,9 +81,11 @@ class PolyMarketMaker(BaseStrategy):
         self.max_markets = self.mm_config.get("max_markets", 8)
         self.min_liquidity = self.mm_config.get("min_liquidity", 50)  # USD — skip empty books
 
-        # Avellaneda-Stoikov parameters
-        self.gamma = 0.1  # risk aversion (higher = wider spreads)
-        self.kappa = 1.5  # order arrival intensity
+        # Avellaneda-Stoikov parameters — calibrated for prediction markets [0, 1]
+        # gamma=0.1/kappa=1.5 produced 1.29 spread (entire price range!).
+        # gamma=10/kappa=100 → spread ≈ 0.04, inventory shift ≈ 1-2c at full load.
+        self.gamma = 10.0  # risk aversion (higher = wider spreads)
+        self.kappa = 100.0  # order arrival intensity (higher = tighter spreads)
 
         self.market_states: dict[str, MarketState] = {}  # token_id -> state
         self._active_orders: dict[str, LiveOrder] = {}    # order_id -> LiveOrder
@@ -335,7 +337,9 @@ class PolyMarketMaker(BaseStrategy):
         """
         mid = book.mid_price
         sigma = state.volatility
-        q = state.inventory / max(self.max_inventory, 1)  # normalize to [-1, 1]
+        # Normalize inventory to [-1, 1] using USD value (max_inventory is USD)
+        inventory_usd = state.inventory * mid
+        q = inventory_usd / max(self.max_inventory, 1)
 
         # Clamp mid to valid range — exclude near-resolution markets (>95% resolved)
         if mid <= 0.05 or mid >= 0.95:
