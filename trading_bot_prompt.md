@@ -1,453 +1,258 @@
 # Trading Bot — Polymarket + Interactive Brokers + Kalshi
 
-## Estado de Implementación
+## Estado de Implementacion
 
 | Componente | Estado | Archivo |
 |---|---|---|
-| Core engine (async event loop) | ✅ Implementado | `core/engine.py` |
-| Risk manager (dynamic sizing + degradation) | ✅ Implementado | `core/risk_manager.py` |
-| Portfolio tracker | ✅ Implementado | `core/portfolio.py` |
-| Base strategy + Signal validation | ✅ Implementado | `strategies/base_strategy.py` |
-| Polymarket connector (WebSocket-first) | ✅ Implementado | `connectors/polymarket_client.py` |
-| Market maker Avellaneda-Stoikov | ✅ Implementado | `strategies/poly_market_maker.py` |
-| IB connector (ib_async + auto-reconnect) | ✅ Implementado | `connectors/ib_client.py` |
-| Pairs trading (cointegración dinámica) | ✅ Implementado | `strategies/ib_pairs.py` |
-| Telegram bot (comandos + notificaciones) | ✅ Implementado | `connectors/telegram_bot.py` |
-| SQLite WAL database | ✅ Implementado | `data/db.py` |
-| Config + secrets management | ✅ Implementado | `config/settings.yaml`, `utils/helpers.py` |
-| Logger (rotating file + console) | ✅ Implementado | `utils/logger.py` |
-| Entry point + wiring | ✅ Implementado | `main.py` |
-| Security audit | ✅ Auditado (1 HIGH + 5 MED + 2 LOW corregidos) |
-| Execution router (multi-platform) | ✅ Implementado | `core/execution_router.py` |
-| Polymarket live orders (py-clob-client) | ✅ Implementado | `connectors/polymarket_client.py` |
-| Tests unitarios (30 tests) | ✅ Implementado | `tests/test_risk.py`, `tests/test_strategies.py` |
-| News edge (pipeline 2 etapas) | ⏳ Fase 2 | `strategies/poly_news_edge.py` |
-| Probability model LLM | ⏳ Fase 2 | `strategies/poly_probability_model.py` |
-| LLM client (Claude API) | ⏳ Fase 2 | `connectors/llm_client.py` |
-| News scraper (RSS + APIs) | ⏳ Fase 2 | `connectors/news_scraper.py` |
-| Cross-platform arb Poly/Kalshi | ⏳ Fase 4 | `strategies/cross_platform_arb.py` |
-| Kalshi connector | ⏳ Fase 4 | `connectors/kalshi_client.py` |
+| Core engine (async event loop) | Done | `core/engine.py` |
+| Risk manager (dynamic sizing + degradation) | Done | `core/risk_manager.py` |
+| Portfolio tracker | Done | `core/portfolio.py` |
+| Base strategy + Signal validation | Done | `strategies/base_strategy.py` |
+| Polymarket connector (WS + CLOB signing) | Done | `connectors/polymarket_client.py` |
+| Market maker Avellaneda-Stoikov | Done | `strategies/poly_market_maker.py` |
+| IB connector (ib_async + auto-reconnect) | Done | `connectors/ib_client.py` |
+| Pairs trading (cointegration dinamica) | Done | `strategies/ib_pairs.py` |
+| Telegram bot (comandos + notificaciones) | Done | `connectors/telegram_bot.py` |
+| SQLite WAL database | Done | `data/db.py` |
+| Config + secrets management | Done | `config/settings.yaml`, `utils/helpers.py` |
+| Logger (rotating file + UTF-8 console) | Done | `utils/logger.py` |
+| Entry point + wiring | Done | `main.py` |
+| Execution router (multi-platform) | Done | `core/execution_router.py` |
+| Polymarket live orders (py-clob-client) | Done | `connectors/polymarket_client.py` |
+| Tests unitarios (30 tests) | Done | `tests/test_risk.py`, `tests/test_strategies.py` |
+| Paper mode runtime verificado | Done | Ran 90s+, signals generated, fills tracked |
+| Security audit | Done | 1 HIGH + 5 MED + 2 LOW corregidos |
+| News edge (pipeline 2 etapas) | Fase 2 | `strategies/poly_news_edge.py` |
+| Probability model LLM | Fase 2 | `strategies/poly_probability_model.py` |
+| LLM client (Claude API) | Fase 2 | `connectors/llm_client.py` |
+| News scraper (RSS + APIs) | Fase 2 | `connectors/news_scraper.py` |
+| Cross-platform arb Poly/Kalshi | Fase 4 | `strategies/cross_platform_arb.py` |
+| Kalshi connector | Fase 4 | `connectors/kalshi_client.py` |
+
+---
+
+## Cuentas Configuradas
+
+| Plataforma | Estado | Detalle |
+|---|---|---|
+| Polymarket | Listo | Wallet magic, private key + CLOB API L2 auth, $339.87 USDC |
+| Telegram | Listo | @Morris_Trading_bot, token + chat_id configurados |
+| Interactive Brokers | Pendiente | Necesita IB Gateway/TWS para paper trading |
+| Anthropic (Claude API) | Fase 2 | Solo cuando se implementen estrategias LLM |
+| Kalshi | Fase 4 | Solo con capital > $5,000 |
 
 ---
 
 ## Contexto
 
-Inversor con cuenta en Interactive Brokers y experiencia en Polymarket. Bot modular en Python que opera de forma autónoma con supervisión vía Telegram. Stack: Python 3.12+, asyncio, WebSocket-first.
+Bot modular en Python que opera de forma autonoma con supervision via Telegram. Stack: Python 3.14, asyncio, WebSocket-first.
 
-**Capital inicial: $500 USD**
-- $400 → Polymarket market making (live)
-- $100 → Reserva para gas/fees en Polygon
-- $0 → IB pairs trading (paper only hasta validar)
+**Capital actual: $340 USD (Polymarket)**
+- $340 en Polymarket (USDC en Polygon)
+- IB: paper only (no requiere capital)
 
 ---
 
-## Arquitectura Actual
+## Arquitectura
 
 ```
 trading-bot/
-├── config/
-│   ├── settings.yaml              # Config centralizada
-│   └── secrets.env                # API keys (gitignored)
-├── core/
-│   ├── engine.py                  # Event-driven async loop, strategy orchestration
-│   ├── risk_manager.py            # Dynamic sizing, kill switch, execution degradation
-│   └── portfolio.py               # Posiciones, PnL, exposure, fees, LLM cost tracking
-├── strategies/
-│   ├── base_strategy.py           # ABC + Signal (validado: direction, price, size, confidence)
-│   ├── poly_market_maker.py       # Avellaneda-Stoikov + informed flow + fee awareness
-│   ├── ib_pairs.py                # Cointegración dinámica + z-score mean reversion
-│   ├── poly_news_edge.py          # [FASE 2] Pipeline 2 etapas: rules → Claude haiku
-│   ├── poly_probability_model.py  # [FASE 2] Modelo LLM direccional
-│   └── cross_platform_arb.py      # [FASE 4] Polymarket vs Kalshi
-├── connectors/
-│   ├── polymarket_client.py       # WebSocket market data + REST orders
-│   ├── ib_client.py               # ib_async wrapper + auto-reconnect + streaming
-│   ├── telegram_bot.py            # /status /trades /stop /start /risk /pnl
-│   ├── llm_client.py              # [FASE 2] Claude API wrapper
-│   ├── kalshi_client.py           # [FASE 4] Kalshi API
-│   └── news_scraper.py            # [FASE 2] RSS + APIs
-├── data/
-│   └── db.py                      # SQLite WAL + async write queue + índices
-├── utils/
-│   ├── logger.py                  # Rotating file (100MB x7) + console
-│   └── helpers.py                 # Config loader, env var resolution, validation
-├── tests/                         # [PENDIENTE]
-├── main.py                        # Entry point, wires all components
-├── requirements.txt
-└── .gitignore
++-- config/
+|   +-- settings.yaml              # Config centralizada
+|   +-- secrets.env                # API keys (gitignored)
+|   +-- secrets.env.example        # Template
++-- core/
+|   +-- engine.py                  # Event-driven async loop, strategy orchestration
+|   +-- execution_router.py        # Routes signals to Polymarket or IB
+|   +-- risk_manager.py            # Dynamic sizing, kill switch, execution degradation
+|   +-- portfolio.py               # Posiciones, PnL, exposure, fees
++-- strategies/
+|   +-- base_strategy.py           # ABC + Signal (validado: direction, price, size, confidence)
+|   +-- poly_market_maker.py       # Avellaneda-Stoikov + informed flow + fee awareness
+|   +-- ib_pairs.py                # Cointegration dinamica + z-score mean reversion
++-- connectors/
+|   +-- polymarket_client.py       # WebSocket market data + REST CLOB orders (signed)
+|   +-- ib_client.py               # ib_async wrapper + auto-reconnect + streaming
+|   +-- telegram_bot.py            # /status /trades /stop /start /risk /pnl
++-- data/
+|   +-- db.py                      # SQLite WAL + async write queue
++-- utils/
+|   +-- logger.py                  # Rotating file (100MB x7) + UTF-8 console
+|   +-- helpers.py                 # Config loader, env var resolution, validation
++-- tests/
+|   +-- test_risk.py               # 15 tests: risk manager
+|   +-- test_strategies.py         # 15 tests: signals, cointegration, A-S model
++-- main.py                        # Entry point
++-- .gitignore
 ```
 
 ---
 
-## Módulo 1: Core Engine
+## Que se verifico en Paper Mode
 
-### engine.py — Implementado
+Bot corrido exitosamente en paper mode:
+1. Database SQLite WAL conecta OK
+2. Telegram bot arranca, manda notificacion de inicio, polling activo
+3. Polymarket CLOB client inicializa con L2 auth (live orders enabled)
+4. Gamma API fetcha 31,000+ mercados activos
+5. Market maker selecciona 8 mercados, suscribe 16 tokens via WebSocket
+6. WebSocket conecta y recibe orderbooks en tiempo real
+7. Estrategia genera senales y ejecuta paper trades (A-S model funcional)
+8. Fills se trackean en inventory del market maker
+9. IB se deshabilita gracefully si no hay Gateway corriendo
+10. 30/30 tests pasan
+
+**Issues arreglados durante runtime:**
+- python-telegram-bot 20.7 incompatible con httpx 0.28 -> upgrade a 22.6
+- YAML parsea `0x...` como hex int -> conversion explicita a string
+- Gamma API devuelve JSON strings -> json.loads()
+- Emojis crashean Windows console (cp1252) -> UTF-8 wrapper
+- target_spread 0.05 demasiado alto para mercados reales -> 0.02
+
+---
+
+## Modulo 1: Core Engine
+
+### engine.py
 - Event-driven async loop (asyncio)
-- Strategy registration con intervalo configurable por strategy
-- Ciclo: `run_cycle()` → `evaluate()` → risk check → `execute` → log → notify
-- Paper mode: simula ejecución instantánea al precio de señal
-- Live mode: delega a executor callback (connector)
-- Background loops: heartbeat (30min), daily risk reset (midnight UTC)
-- Graceful shutdown: SIGINT/SIGTERM (Unix), cancela todas las tasks
-- Notificaciones Telegram en cada trade y al arrancar/parar
+- Strategy registration con intervalo configurable
+- Paper mode: simula fill instantaneo al precio de senal
+- Live mode: delega a ExecutionRouter (polymarket/ib)
+- Background: heartbeat (30min), daily risk reset (midnight UTC)
+- Graceful shutdown: cancela tasks, notifica Telegram
+- `_notify_strategy_fill()`: conecta fills con inventory del market maker
 
-### risk_manager.py — Implementado
-- **Dynamic position sizing** basado en volatilidad (no porcentaje fijo)
-- Max loss por estrategia individual + global
-- Max exposición total configurable (60% default)
-- **Kill switch**: drawdown > 5% → detener todo + notificar Telegram
-- Cooldown: 3 trades perdedores consecutivos → pausar 30 min
-- **Execution degradation detection**:
-  - Fill rate < 80% → reducir tamaño
-  - Slippage promedio > 1% → pausar estrategia
-  - Latencia > 5s → alertar y reducir
-- Rolling window de métricas de ejecución por estrategia
-- Config via `RiskConfig.from_dict()` (settings.yaml)
+### risk_manager.py
+- **Dynamic sizing** basado en volatilidad
+- Max exposicion total: 60% de capital
+- **Kill switch**: drawdown > 5% -> detener todo + Telegram
+- Cooldown: 3 losses consecutivos -> pausar 30 min
+- **Execution degradation**: fill rate < 80%, slippage > 1%, latencia > 5s
+- Rolling window metricas por estrategia
 
-### portfolio.py — Implementado
-- Tracking en tiempo real de posiciones (Polymarket + IB)
+### portfolio.py
+- Tracking real-time posiciones (Polymarket + IB)
 - PnL realizado y no realizado
-- Exposure neto y por posición
-- Tracking de fees + costos Claude API
-- `deque(maxlen=10000)` para closed trades (bounded memory)
-- Async locks en `update_price()` y `add_llm_cost()`
+- Exposure neto y por posicion/estrategia/plataforma
+- Fees + LLM cost tracking
+- Async locks, bounded deque (10000 closed trades)
 
 ---
 
-## Módulo 2: Polymarket Strategies
+## Modulo 2: Polymarket Market Maker
 
-### poly_market_maker.py — Implementado (Avellaneda-Stoikov)
-Lógica:
-1. **Selección de mercados**: volumen $500-5000/día, max 5 mercados simultáneos
-2. **Modelo Avellaneda-Stoikov**:
-   - Reservation price = mid - q * γ * σ² * T
-   - Optimal spread = γ * σ² * T + (2/γ) * ln(1 + γ/κ)
-   - Parámetros: γ=0.1 (risk aversion), κ=1.5 (order arrival intensity)
+### poly_market_maker.py (Avellaneda-Stoikov)
+1. **Seleccion de mercados**: volumen $200-10000/dia, max 8 mercados
+2. **Modelo A-S**: reservation_price = mid - q*gamma*sigma^2*T, optimal_spread = gamma*sigma^2*T + (2/gamma)*ln(1+gamma/kappa)
 3. **Inventory-adjusted quotes**: sesgo hacia reducir inventario
-4. **Informed flow detection**: top-level size > $500 → ampliar spread
-5. **Fee awareness**: fees dinámicos por mercado (0% global markets, hasta 3% crypto)
-6. **Cancel/repost**: si mercado mueve > 2c
-7. Max inventory por mercado: $200
+4. **Informed flow detection**: top-level size > $500 -> skip
+5. **Fee awareness**: fees dinamicos por mercado
+6. **Order lifecycle**: LiveOrder con TTL, cancel stale, repost si market mueve > 2c
+7. **Fill tracking**: on_fill() actualiza inventory de fills reales, track_order() para paper
 
-### poly_news_edge.py — FASE 2 (no implementado)
-Pipeline 2 etapas:
-1. Filtro barato (rules/keywords) sobre RSS/APIs
-2. Claude haiku solo si pasa filtro → clasificar relevancia + estimar dirección
-3. Ejecutar si confidence > 70% y mercado no ajustó
-4. Latencia objetivo: < 30s
-5. Max costo Claude: $0.50/día
-
-### poly_probability_model.py — FASE 2 (no implementado)
-- Claude haiku estima probabilidad real del evento
-- Compara vs precio de mercado
-- Posición si diferencia > 5%
-- Re-evaluar cada 4-6 horas
-- Paper hasta accuracy > 60%
-
-### cross_platform_arb.py — FASE 4 (no implementado)
-- Polymarket vs Kalshi con normalización de contratos
-- Verificar reglas de resolución, expiración, tamaños mínimos
-- Solo pares 100% verificados
-- Solo con capital > $5,000
+### polymarket_client.py
+- WebSocket para market data (no rate limits)
+- REST para ordenes (60/min limit)
+- py-clob-client para signed orders (L2 auth: HMAC-SHA256)
+- Paper mode: simula fills instantaneos
+- Live mode: create_order + post_order (EIP-712 signing)
+- cancel_order, cancel_all_orders
+- Gamma API para market discovery (31,000+ mercados)
 
 ---
 
-## Módulo 3: IB Pairs Trading
+## Modulo 3: IB Pairs Trading
 
-### ib_pairs.py — Implementado (Scanner Dinámico de Cointegración)
+### ib_pairs.py (Scanner Dinamico)
+- Universo: ~30 simbolos, ~435 combinaciones
+- Engle-Granger cointegration (ADF sobre residuos OLS)
+- Half-life AR(1): filtro 5-60 dias
+- Top 5 pares por p-value
+- Re-scan cada 24h, preserva posiciones abiertas
+- Senales: entry z>2.0, exit z<0.5, stop z>3.5
 
-**Cambio vs spec original**: se eliminaron los pares hardcodeados de ADRs argentinos. El scanner ahora encuentra los mejores pares dinámicamente de un universo amplio.
-
-**Universo configurable** (~30 símbolos, ~435 combinaciones):
-- Sector ETFs: XLE, XOP, XLF, KBE, GDX, GDXJ, XLK, VGT, XLV, XBI
-- Large-cap: KO, PEP, V, MA, JPM, BAC, HD, LOW, MSFT, AAPL
-- Commodities: GLD, GDX, USO, SLV, PAAS
-- Index: SPY, IVV, QQQ, QQQM, IWM, VTWO
-- Dual-class: GOOG/GOOGL
-
-**Lógica del scanner**:
-1. Carga data histórica (120 días) de todo el universo al arrancar
-2. Testea cointegración Engle-Granger (ADF sobre residuos OLS)
-3. Calcula half-life de mean reversion (AR(1) sobre residuos)
-4. Filtra: p-value < 0.05, half-life entre 5 y 60 días
-5. Rankea por p-value (menor = mejor)
-6. Opera top 5 pares simultáneos
-7. Re-escanea cada 24 horas, rota pares que pierden cointegración
-8. Preserva pares con posición abierta al re-escanear
-
-**Señales de trading**:
-- Entry: z-score > 2.0 (short spread) o < -2.0 (long spread)
-- Exit: z-score cruza ±0.5
-- Stop: z-score > 3.5 o < -3.5
-- Size: $50/leg (conservador para paper)
-
-### ib_client.py — Implementado
-- Conexión via `ib_async` (NO ib_insync — archivado marzo 2024)
-- Auto-reconnect con exponential backoff (5s → 120s max)
-- Historical data: `reqHistoricalData` async con timeout
-- Real-time: `reqMktData` + `pendingTickersEvent`
-- Orders: `MarketOrder` / `LimitOrder` con espera de fill
-- `get_positions()`, `get_account_value()`
-- Re-subscribe automático tras reconexión
-- Puertos: 4002 (paper), 4001 (live)
+### ib_client.py
+- ib_async (sucesor de ib_insync)
+- Auto-reconnect exponential backoff (5s->120s)
+- Historical data, streaming, orders
+- Se deshabilita automaticamente si no hay Gateway
 
 ---
 
-## Módulo 4: Telegram Bot — Implementado
+## Modulo 4: Telegram Bot
 
-Comandos:
-- `/status` → Equity, cash, exposure, PnL, drawdown, posiciones, fees
-- `/trades` → Últimos 10 trades
-- `/stop` → Kill switch manual
-- `/start` → Reanudar trading
-- `/risk` → Estado de risk, degradation metrics, paused strategies
-- `/pnl` → PnL realizado + no realizado + fees + LLM cost
-
-Notificaciones automáticas:
-- Cada trade ejecutado (dirección, size, symbol, precio, PnL)
-- Bot start/stop
-- Heartbeat cada 30 min (equity, PnL, posiciones)
-
-**Pendiente**: `/audit`, `/compare`, `/set`, resumen diario automático
+Comandos: /status /trades /stop /start /risk /pnl
+Notificaciones: cada trade, start/stop, heartbeat 30min
 
 ---
 
-## Módulo 5: Configuración
-
-### settings.yaml — Actualizado
-```yaml
-general:
-  mode: paper
-  capital_usd: 500
-  log_level: INFO
-
-polymarket:
-  api_key: ${POLY_API_KEY}
-  chain_id: 137
-  min_profit_threshold: 0.015
-  ws_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
-  max_position_per_market: 100
-  market_maker:
-    target_spread: 0.05
-    max_inventory: 200
-    repost_threshold: 0.02
-
-ib:
-  host: 127.0.0.1
-  port: 4002
-  client_id: 1
-  universe:
-    sector_etfs: [XLE, XOP, XLF, KBE, GDX, GDXJ, XLK, VGT, XLV, XBI]
-    large_cap: [KO, PEP, V, MA, JPM, BAC, HD, LOW, MSFT, AAPL]
-    commodities: [GLD, GDX, USO, SLV, PAAS]
-    index: [SPY, IVV, QQQ, QQQM, IWM, VTWO]
-    dual_class: [[GOOG, GOOGL]]
-  scanner:
-    lookback_days: 120
-    rescan_hours: 24
-    max_active_pairs: 5
-    min_half_life: 5
-    max_half_life: 60
-  zscore_entry: 2.0
-  zscore_exit: 0.5
-  zscore_stop: 3.5
-  cointegration_pvalue: 0.05
-
-kalshi:  # Fase 4
-  api_key: ${KALSHI_API_KEY}
-  demo_mode: true
-
-llm:
-  provider: anthropic
-  model: claude-haiku-4-5-20251001
-  fallback_model: claude-sonnet-4-6
-  validate_model_on_startup: true
-  api_key: ${ANTHROPIC_API_KEY}
-  max_cost_per_day: 0.50
-  news_edge_confidence_threshold: 0.70
-  probability_model_diff_threshold: 0.05
-
-risk:
-  max_daily_drawdown_pct: 5.0
-  max_position_pct: 20.0
-  max_total_exposure_pct: 60.0
-  consecutive_loss_cooldown: 3
-  cooldown_minutes: 30
-  execution_degradation:
-    min_fill_rate: 0.80
-    max_slippage_pct: 1.0
-    max_latency_seconds: 5
-
-telegram:
-  bot_token: ${TELEGRAM_BOT_TOKEN}
-  chat_id: ${TELEGRAM_CHAT_ID}
-  daily_summary_hour_utc: 22
-```
-
-### Env vars requeridos (secrets.env)
-- `POLY_API_KEY` — Polymarket CLOB API key
-- `TELEGRAM_BOT_TOKEN` — Bot de @BotFather
-- `TELEGRAM_CHAT_ID` — Chat ID para notificaciones
-- `ANTHROPIC_API_KEY` — (Fase 2)
-- `KALSHI_API_KEY` — (Fase 4)
-
----
-
-## Módulo 6: Deployment
-
-**Fase 1 (actual — Polymarket live + IB paper):**
-- Puede correr local o VPS barato ($5/mes)
-- Para IB paper trading: **requiere TWS o IB Gateway corriendo** (la API no funciona sin uno de los dos)
-  - TWS (interfaz gráfica): más fácil para dev local
-  - IB Gateway (headless): preferible para VPS/servidor
-  - Puerto 4002 (paper) — configurado en settings.yaml
-- Si IB no está disponible, el bot arranca sin pairs trading (se deshabilita automáticamente)
-
-**Fase 3+ (IB live):**
-- IB Gateway + Xvfb + IBC en VPS (o Docker: `gnzsnz/ib-gateway-docker`)
-- Puerto 4001 (live) — cambiar en settings.yaml
-- systemd o docker-compose
-
-**Seguridad (auditada):**
-- secrets.env con permisos 600
-- aiohttp >= 3.13.3 (CVE fix)
-- Signal validation (direction, price, size, confidence)
-- Env vars fail-fast al arrancar
-- Background loops con try/except/CancelledError
-- closed_trades bounded (deque maxlen=10000)
-- update_price con async lock
-- Log level allowlist
-- Config validation (capital > 0, mode valid, risk params positive)
-
----
-
-## Dependencias
+## Secrets (config/secrets.env)
 
 ```
-ib_async>=1.0.0            # IB (sucesor de ib_insync archivado)
-py-clob-client>=0.34       # Polymarket CLOB
-anthropic>=0.40            # Claude API (Fase 2)
-python-telegram-bot==20.7
-aiohttp>=3.13.3            # Pinned por CVE
-pyyaml>=6.0
-python-dotenv>=1.0
-numpy>=1.26
-pandas>=2.1
-scipy>=1.12
-statsmodels>=0.14          # Engle-Granger cointegration
-aiosqlite>=0.19
-feedparser>=6.0            # (Fase 2)
+POLY_PRIVATE_KEY=0x...          # Wallet Polygon (magic wallet)
+POLY_API_KEY=...                # CLOB API (derivado de PK)
+POLY_API_SECRET=...             # CLOB API
+POLY_API_PASSPHRASE=...         # CLOB API
+TELEGRAM_BOT_TOKEN=...          # @Morris_Trading_bot
+TELEGRAM_CHAT_ID=...            # Chat ID del user
+ANTHROPIC_API_KEY=...           # (Fase 2)
+KALSHI_API_KEY=...              # (Fase 4)
+```
+
+---
+
+## Dependencias Principales
+
+```
+ib_async>=1.0.0
+py-clob-client>=0.34
+python-telegram-bot>=22.6
+aiohttp>=3.13.3
+pyyaml, python-dotenv, numpy, statsmodels, aiosqlite
 ```
 
 ---
 
 ## Fases
 
-### Fase 1A — MVP Polymarket ✅ COMPLETADO
-1. ✅ core/engine.py + risk_manager.py + portfolio.py
-2. ✅ connectors/polymarket_client.py (WebSocket-first)
-3. ✅ strategies/poly_market_maker.py (Avellaneda-Stoikov)
-4. ✅ connectors/telegram_bot.py
-5. ✅ data/db.py (SQLite WAL)
-6. ✅ Security audit (1 HIGH + 5 MED + 2 LOW fixed)
-7. ⏳ Deploy local → paper trade 2+ semanas → live con $400
+### Fase 1A — MVP Polymarket -> COMPLETADO
+- Core engine, risk, portfolio, polymarket connector, market maker, telegram, db
+- Security audit, execution router, signed orders, tests
 
-### Fase 1B — IB Pairs Paper ✅ COMPLETADO
-8. ✅ connectors/ib_client.py (ib_async + auto-reconnect)
-9. ✅ strategies/ib_pairs.py (scanner dinámico de cointegración)
-10. Paper indefinido hasta validar
+### Fase 1B — IB Pairs Paper -> COMPLETADO
+- IB connector, pairs trader, dynamic cointegration scanner
 
-### Fase 2 — LLM (cuando fase 1 sea rentable)
-11. connectors/llm_client.py (Claude API wrapper)
-12. connectors/news_scraper.py
-13. strategies/poly_news_edge.py (pipeline 2 etapas)
-14. strategies/poly_probability_model.py
-15. Paper trade LLM strategies 1+ mes
+### Fase 1C — Paper Trading Validacion -> EN CURSO
+- Paper mode verificado, bot corre exitosamente
+- Pendiente: correr 2-4 semanas continuo, recopilar metricas
+- Deployment en VPS para uptime 24/7
+
+### Fase 2 — LLM Strategies (cuando fase 1 sea rentable)
+- llm_client.py (Claude haiku), news_scraper.py
+- poly_news_edge.py (pipeline 2 etapas: rules -> haiku)
+- poly_probability_model.py
 
 ### Fase 3 — Escalar (si 2 meses rentables)
-16. Meter más capital ($1,000-2,000)
-17. Activar IB pairs live
-18. Evaluar news edge live
-19. Setup IB Gateway en VPS
+- Capital $1,000-2,000, IB pairs live, IB Gateway en VPS
 
-### Fase 4 — Cross-Platform Arb (solo si capital > $5,000)
-20. connectors/kalshi_client.py
-21. strategies/cross_platform_arb.py (normalización de contratos)
-
----
-
-## Qué Falta para Paper Trading Real
-
-Para poder ejecutar el bot en paper mode:
-
-1. **Secrets configurados**: crear `config/secrets.env` con `POLY_PRIVATE_KEY`, `POLY_API_KEY`/`SECRET`/`PASSPHRASE`, y `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`
-2. ~~**Tests unitarios**~~: ✅ 30 tests implementados (risk, sizing, cointegración, A-S model, inventory tracking)
-3. **Paper execution de Polymarket**: simula fills instantáneos — considerar simular latencia y slippage realistas
-4. **IB Gateway/TWS corriendo**: necesario para pairs trading (se deshabilita automáticamente si IB no está disponible)
-5. **Validar con data real**: el market maker necesita mercados activos en Polymarket; el pairs trader necesita data histórica de IB
-
-## Qué Falta para Live Trading
-
-Requisitos adicionales antes de operar con dinero real:
-
-1. ~~**ExecutionRouter**~~: ✅ Implementado — routea signals a Polymarket o IB según plataforma
-2. ~~**Polymarket signed orders**~~: ✅ Integrado py-clob-client con EIP-712 signing (L2 auth)
-3. ~~**Quote management real**~~: ✅ Inventory from fills, order TTL, cancel/repost lifecycle
-4. **Allowances en Polygon**: aprobar USDC y Conditional Tokens para los contratos de exchange
-5. **Paper trade 2-4 semanas**: métricas duras antes de ir live
-6. **Ejecución atómica IB pairs**: fail-safe si una leg falla (hedge inmediato de la otra)
+### Fase 4 — Cross-Platform Arb (capital > $5,000)
+- Kalshi connector + arb strategy
 
 ---
 
 ## KPIs Operativos
 
-| KPI | Target | Nota |
-|---|---|---|
-| Sharpe ratio | > 1.5 | Rolling 30 días |
-| Max drawdown | < 5% | $25 con $500 capital |
-| Fill rate | > 90% | Market maker |
-| Slippage promedio | < 0.5% | Vs precio esperado |
-| PnL neto de fees | Positivo | Rolling 30 días |
-| Costo Claude API | < $20/mes | Fase 2 |
-| Objetivo mínimo | No perder dinero | Primeros 2 meses |
-
-### Criterios de Escalado
-
-| Condición | Acción |
+| KPI | Target |
 |---|---|
-| 2 meses rentables, Sharpe > 1.0 | Escalar a $1,000-2,000 |
-| 4 meses rentables, Sharpe > 1.5 | Escalar a $5,000+, activar IB live |
-| Drawdown > 10% ($50+ perdidos) | Pausar, analizar, ajustar parámetros |
-| 2 meses con pérdida | Volver a paper, no meter más capital |
-| Estrategia pierde 3 meses seguidos | Desactivar estrategia |
+| Sharpe ratio | > 1.5 (rolling 30d) |
+| Max drawdown | < 5% |
+| Fill rate | > 90% |
+| Slippage promedio | < 0.5% |
+| PnL neto de fees | Positivo (rolling 30d) |
+| Objetivo minimo | No perder dinero primeros 2 meses |
 
----
-
-## Sistema de Auditorías
-
-### Métricas trackeadas por estrategia
-- PnL diario/semanal/mensual (realizado + no realizado)
-- Win rate y profit factor
-- Sharpe ratio rolling (30 días)
-- Max drawdown del período
-- Trades y frecuencia
-- Costo Claude API
-- Slippage promedio
-- Fill rate
-
-### Auditoría Semanal (domingos)
-1. Performance por estrategia
-2. Risk check: drawdown, exposición
-3. Ejecución: slippage, fills
-4. Costos: fees Poly + comisiones IB + Claude API
-5. Errores: reconexiones, timeouts, fallos
-
-### Auditoría Mensual
-- Go/Kill por estrategia (pierde 2 meses → pausar, Sharpe < 0.5 → revisar)
-- Rebalanceo de capital entre estrategias
-- Calibración de parámetros (z-score, spread, confidence thresholds)
-
-### Auditoría Trimestral
-- Cambios de mercado (fees, regulación, competencia)
-- Nuevas oportunidades (plataformas, instrumentos, datos)
-- Escalar o pivotar
+### Escalado
+- 2 meses rentables, Sharpe > 1.0 -> $1,000-2,000
+- 4 meses rentables, Sharpe > 1.5 -> $5,000+, IB live
+- Drawdown > 10% -> pausar, analizar
+- 2 meses con perdida -> volver a paper
