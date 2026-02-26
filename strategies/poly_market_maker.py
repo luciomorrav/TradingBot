@@ -13,6 +13,7 @@ import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from connectors.polymarket_client import OrderBook, Market, PolymarketClient
 from core.portfolio import Platform, Portfolio, Side, Trade
@@ -368,11 +369,24 @@ class PolyMarketMaker(BaseStrategy):
         top_ask_size = book.asks[0].size * book.asks[0].price
         return top_bid_size > self.informed_flow_threshold or top_ask_size > self.informed_flow_threshold
 
+    @staticmethod
+    def _market_is_expired(end_date: str) -> bool:
+        """Return True if the market's end_date is in the past."""
+        if not end_date:
+            return False
+        try:
+            dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            return dt < datetime.now(timezone.utc)
+        except (ValueError, AttributeError):
+            return False
+
     def _select_markets(self, markets: list[Market]) -> list[Market]:
         """Select niche markets suitable for market making."""
         selected = []
         for m in markets:
             if not m.active or not m.tokens:
+                continue
+            if self._market_is_expired(m.end_date):
                 continue
             if self.min_volume <= m.volume <= self.max_volume:
                 if m.liquidity >= self.min_liquidity:
