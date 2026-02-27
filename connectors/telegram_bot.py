@@ -41,6 +41,7 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("start", self._cmd_start))
         self._app.add_handler(CommandHandler("risk", self._cmd_risk))
         self._app.add_handler(CommandHandler("pnl", self._cmd_pnl))
+        self._app.add_handler(CommandHandler("reset", self._cmd_reset))
 
         await self._app.initialize()
         await self._app.start()
@@ -165,6 +166,40 @@ class TelegramBot:
             f"<b>Net: ${s['net_pnl']:+.2f}</b>"
         )
         await update.message.reply_text(text, parse_mode="HTML")
+
+    async def _cmd_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        if not self.engine:
+            await update.message.reply_text("Engine not connected")
+            return
+        if self.engine.mode != "paper":
+            await update.message.reply_text("Reset only available in paper mode.")
+            return
+
+        args = context.args or []
+        if "confirm" not in args:
+            s = self.engine.portfolio.summary()
+            await update.message.reply_text(
+                f"⚠️ <b>Reset paper portfolio?</b>\n"
+                f"Current equity: ${s['equity']:.2f} (PnL: ${s['equity_pnl']:+.2f})\n"
+                f"Positions: {s['open_positions']} | Fees: ${s['total_fees']:.2f}\n\n"
+                f"This resets cash to ${self.engine.portfolio.initial_capital:.0f}, "
+                f"clears all positions and PnL counters.\n\n"
+                f"Type /reset confirm to proceed.",
+                parse_mode="HTML",
+            )
+            return
+
+        before = self.engine.portfolio.summary()
+        await self.engine.reset_paper()
+        after = self.engine.portfolio.summary()
+        await update.message.reply_text(
+            f"✅ <b>Paper portfolio reset</b>\n"
+            f"Before: equity ${before['equity']:.2f}, {before['open_positions']} positions\n"
+            f"After:  equity ${after['equity']:.2f}, cash ${after['cash']:.2f}",
+            parse_mode="HTML",
+        )
 
     def _is_authorized(self, update: Update) -> bool:
         """Only respond to the configured chat_id."""

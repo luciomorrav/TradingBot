@@ -464,6 +464,25 @@ class Engine:
             if not task.done():
                 task.cancel()
 
+    # --- Paper reset ---
+
+    async def reset_paper(self):
+        """Reset paper portfolio to initial capital. Paper mode only."""
+        if self.mode != "paper":
+            raise RuntimeError("reset_paper() called in non-paper mode")
+        p = self.portfolio
+        async with p._lock:
+            p.cash = p.initial_capital
+            p.positions.clear()
+            p.closed_trades.clear()
+            p.realized_pnl = 0.0
+            p.total_fees = 0.0
+            p.total_llm_cost = 0.0
+        self.risk_manager.daily_start_equity = p.equity
+        if self._db:
+            await self._db.save_state("portfolio", p.to_dict())
+        logger.info("Paper portfolio reset. Cash: $%.2f", p.cash)
+
     # --- Status ---
 
     def status(self) -> dict:
