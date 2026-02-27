@@ -254,7 +254,17 @@ class Engine:
     async def _handle_fill_inner(self, fill_data: dict):
         event_type = fill_data.get("event_type", "")
 
-        # Only process trade events (not order placements/cancellations)
+        # Handle order cancellations/rejections — clean up pending immediately
+        if event_type == "order":
+            status = fill_data.get("status", "")
+            if status in ("CANCELLED", "REJECTED", "EXPIRED"):
+                order_id = fill_data.get("order_id", "")
+                if order_id and order_id in self._pending_orders:
+                    del self._pending_orders[order_id]
+                    logger.info("Pending order removed (%s): %s", status, order_id[:12])
+            return
+
+        # Only process trade events
         if event_type != "trade":
             return
 
