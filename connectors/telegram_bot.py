@@ -79,7 +79,7 @@ class TelegramBot:
         s = self.engine.portfolio.summary()
         text = (
             f"<b>Status ({self.engine.mode})</b>\n"
-            f"Equity: ${s['equity']:.2f}\n"
+            f"Equity: ${s['equity']:.2f} (PnL: ${s['equity_pnl']:+.2f})\n"
             f"Cash: ${s['cash']:.2f}\n"
             f"Exposure: ${s['total_exposure']:.2f} ({s['exposure_pct']:.0f}%)\n"
             f"PnL: ${s['net_pnl']:+.2f}\n"

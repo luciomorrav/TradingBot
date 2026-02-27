@@ -173,6 +173,11 @@ class Portfolio:
         return self.total_pnl - self.total_llm_cost
 
     @property
+    def equity_pnl(self) -> float:
+        """Reliable PnL = equity - initial_capital. Use this for paper mode performance."""
+        return self.equity - self.initial_capital
+
+    @property
     def equity(self) -> float:
         return self.cash + self.total_exposure + self.total_unrealized_pnl
 
@@ -208,6 +213,7 @@ class Portfolio:
     def summary(self) -> dict:
         return {
             "equity": round(self.equity, 2),
+            "equity_pnl": round(self.equity_pnl, 2),
             "cash": round(self.cash, 2),
             "total_exposure": round(self.total_exposure, 2),
             "exposure_pct": round(self.exposure_pct, 1),

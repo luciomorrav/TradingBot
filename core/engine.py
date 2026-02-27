@@ -158,8 +158,12 @@ class Engine:
                 return
 
         orig_fee = sig.metadata.get("fee")
-        fee = (orig_fee * (size_usd / sig.size_usd) if orig_fee is not None and sig.size_usd > 0
-               else size_usd * self._paper_fee_rate)
+        if orig_fee is not None and sig.size_usd > 0:
+            market_fee = orig_fee * (size_usd / sig.size_usd)
+            # In paper mode use paper_fee_rate as floor (market fee may be 0% maker)
+            fee = max(market_fee, size_usd * self._paper_fee_rate)
+        else:
+            fee = size_usd * self._paper_fee_rate
 
         trade = Trade(
             trade_id=str(uuid.uuid4())[:8],
