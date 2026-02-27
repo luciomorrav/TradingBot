@@ -133,6 +133,9 @@ class PolyMarketMaker(BaseStrategy):
         # Restore saved inventory (if tokens match)
         await self._restore_inventory()
 
+        # Remove portfolio positions for tokens no longer being market-made
+        await self._cleanup_stale_positions()
+
         self.client.on_book_update(self._on_book_update)
         await self.client.subscribe_market(token_ids)
         self.logger.info("Market maker active on %d tokens across %d markets", len(token_ids), len(selected))
@@ -174,6 +177,32 @@ class PolyMarketMaker(BaseStrategy):
                 self.logger.info("Restored inventory for %d/%d tokens", restored, len(saved))
         except Exception:
             self.logger.exception("Failed to restore MM inventory")
+
+    async def _cleanup_stale_positions(self):
+        """Remove portfolio positions for tokens no longer being market-made.
+
+        On each restart, the MM may select different markets. Positions from old
+        markets accumulate in the portfolio and inflate exposure. This returns
+        their cost basis to cash so capital can be redeployed to active markets.
+        """
+        active_token_ids = set(self.market_states.keys())
+        stale_keys = [
+            key for key, pos in self.portfolio.positions.items()
+            if pos.strategy == self.name and pos.market_id not in active_token_ids
+        ]
+        if not stale_keys:
+            return
+
+        async with self.portfolio._lock:
+            for key in stale_keys:
+                pos = self.portfolio.positions.pop(key, None)
+                if pos:
+                    self.portfolio.cash += pos.size  # return cost basis to cash
+                    self.logger.info(
+                        "Removed stale position: %s %.2f USD → returned to cash",
+                        pos.market_id[:20], pos.size,
+                    )
+        self.logger.info("Cleaned up %d stale positions from previous session", len(stale_keys))
 
     async def evaluate(self) -> list[Signal]:
         signals: list[Signal] = []
@@ -278,7 +307,7 @@ class PolyMarketMaker(BaseStrategy):
 
         if signals:
             self.logger.info("Generated %d signals this cycle", len(signals))
-            for sig in signals[:4]:
+            for sig in signals:
                 self.logger.info("  %s %s $%.1f @ %.4f", sig.direction, sig.symbol, sig.size_usd, sig.price)
 
         return signals

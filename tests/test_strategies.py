@@ -537,6 +537,31 @@ async def test_handle_fill_partial_keeps_pending():
 
 
 @pytest.mark.asyncio
+async def test_paper_execute_no_cash_overdraw():
+    """Multiple BUY signals in one cycle must not overdraw cash."""
+    from core.portfolio import Portfolio
+    from core.risk_manager import RiskConfig, RiskManager
+    from core.engine import Engine
+
+    portfolio = Portfolio(capital_usd=30.0)  # tight cash
+    rm = RiskManager(portfolio, RiskConfig())
+    engine = Engine(portfolio, rm, {"general": {"mode": "paper"},
+                                    "polymarket": {"paper_fee_rate": 0.005}})
+
+    # Three BUY signals, each wanting $21 — total $63 > $30 available
+    for i in range(3):
+        sig = Signal(
+            strategy="poly_mm", market_id=f"m{i}", symbol="Yes",
+            direction="buy", size_usd=21.0, price=0.50,
+            metadata={"token_id": f"tok{i}", "platform": "polymarket", "fee": 0.0},
+        )
+        await engine._paper_execute(sig)
+
+    # Cash must never go negative
+    assert portfolio.cash >= 0.0, f"Cash went negative: {portfolio.cash}"
+
+
+@pytest.mark.asyncio
 async def test_close_position_partial_pnl():
     """Partial close should calculate PnL correctly using shares, not USD notional."""
     from core.portfolio import Portfolio, Platform, Side, Trade

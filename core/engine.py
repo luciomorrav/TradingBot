@@ -144,6 +144,23 @@ class Engine:
         # For Polymarket use token_id as position key so each token tracks separately
         position_market_id = sig.metadata.get("token_id", sig.market_id)
 
+        # Cap BUY size to available cash — multiple signals in one cycle share the
+        # same cash snapshot at generation time, so later signals can overdraw.
+        size_usd = sig.size_usd
+        if sig.direction == "buy":
+            available = self.portfolio.cash
+            if available < 1.0:
+                logger.debug("Skipping paper BUY: insufficient cash ($%.2f)", available)
+                return
+            max_size = available / (1 + self._paper_fee_rate)
+            size_usd = min(size_usd, max_size)
+            if size_usd < 1.0:
+                return
+
+        orig_fee = sig.metadata.get("fee")
+        fee = (orig_fee * (size_usd / sig.size_usd) if orig_fee is not None and sig.size_usd > 0
+               else size_usd * self._paper_fee_rate)
+
         trade = Trade(
             trade_id=str(uuid.uuid4())[:8],
             platform=Platform.POLYMARKET,  # default, overridden by strategy metadata
@@ -151,8 +168,8 @@ class Engine:
             symbol=sig.symbol,
             side=Side.BUY if sig.direction == "buy" else Side.SELL,
             price=sig.price,
-            size=sig.size_usd,
-            fee=sig.metadata.get("fee") if sig.metadata.get("fee") is not None else sig.size_usd * self._paper_fee_rate,
+            size=size_usd,
+            fee=fee,
             slippage=0.0,
             strategy=sig.strategy,
             timestamp=time.time(),
