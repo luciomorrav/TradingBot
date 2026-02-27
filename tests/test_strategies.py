@@ -370,3 +370,76 @@ async def test_validate_markets_drops_tight_spread():
 
     assert "t_wide" in mm.market_states, "Wide-spread market should remain"
     assert "t_tight" not in mm.market_states, "Tight-spread market should be dropped"
+
+
+# --- Portfolio persistence ---
+
+@pytest.mark.asyncio
+async def test_portfolio_to_dict_and_restore():
+    """Portfolio serializes and restores correctly."""
+    from core.portfolio import Portfolio, Platform, Side, Trade
+    import time as _time
+
+    p = Portfolio(capital_usd=500)
+    trade = Trade(
+        trade_id="t1", platform=Platform.POLYMARKET, market_id="tok1",
+        symbol="Yes", side=Side.BUY, price=0.50, size=21.0, fee=0.10,
+        strategy="poly_mm", timestamp=_time.time(),
+    )
+    await p.open_position(trade)
+
+    data = p.to_dict()
+    assert data["cash"] == pytest.approx(500 - 21.0 - 0.10, abs=0.01)
+    assert "polymarket:tok1:poly_mm" in data["positions"]
+
+    # Restore into a new portfolio
+    p2 = Portfolio(capital_usd=500)
+    p2.restore_from(data)
+    assert p2.cash == pytest.approx(data["cash"], abs=0.01)
+    assert len(p2.positions) == 1
+    pos = list(p2.positions.values())[0]
+    assert pos.avg_price == 0.50
+    assert pos.size == 21.0
+
+
+# --- Engine handle_fill ---
+
+@pytest.mark.asyncio
+async def test_handle_fill_reconciles_pending():
+    """handle_fill matches fill to pending order and updates portfolio."""
+    from core.portfolio import Portfolio
+    from core.risk_manager import RiskConfig, RiskManager
+    from core.engine import Engine
+
+    portfolio = Portfolio(capital_usd=500)
+    rm = RiskManager(portfolio, RiskConfig())
+    engine = Engine(portfolio, rm, {"general": {"mode": "live"}})
+
+    sig = Signal(
+        strategy="poly_mm", market_id="m1", symbol="Yes",
+        direction="buy", size_usd=21.0, price=0.50,
+        metadata={"token_id": "tok1", "platform": "polymarket"},
+    )
+
+    # Register pending order
+    engine._register_pending(sig, {"order_id": "ord_123", "token_id": "tok1"})
+    assert "ord_123" in engine._pending_orders
+
+    # Simulate fill event (we are the maker)
+    fill_data = {
+        "event_type": "trade",
+        "asset_id": "tok1",
+        "status": "MATCHED",
+        "maker_orders": [
+            {"order_id": "ord_123", "matched_amount": "42.0", "price": "0.50"},
+        ],
+        "taker_order_id": "taker_xyz",
+        "side": "SELL",
+        "size": "42.0",
+    }
+    await engine.handle_fill(fill_data)
+
+    # Pending order should be consumed
+    assert "ord_123" not in engine._pending_orders
+    # Portfolio should have an open position
+    assert len(portfolio.positions) == 1

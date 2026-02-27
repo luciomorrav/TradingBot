@@ -4,9 +4,10 @@ import asyncio
 import logging
 import signal
 import sys
+import time
 from datetime import datetime, timezone
 
-from core.portfolio import Portfolio
+from core.portfolio import Platform, Portfolio, Side, Trade
 from core.risk_manager import RiskManager
 from strategies.base_strategy import BaseStrategy, Signal
 
@@ -32,9 +33,15 @@ class Engine:
         self.notify_callback = None  # set by telegram connector
         self.execute_callback = None  # set by connector (polymarket/ib)
         self.db_callback = None  # set by data/db.py
+        self._db = None  # Database instance for state persistence
 
         self._running = False
         self._tasks: list[asyncio.Task] = []
+        self._pending_orders: dict[str, dict] = {}  # order_id → {sig, token_id, side, ...}
+
+        # Paper mode fee rate — configurable via polymarket.paper_fee_rate
+        poly_cfg = config.get("polymarket", {})
+        self._paper_fee_rate = poly_cfg.get("paper_fee_rate", 0.005)
 
     def add_strategy(self, strategy: BaseStrategy, interval_seconds: float = 10.0):
         runner = StrategyRunner(strategy, interval_seconds)
@@ -50,9 +57,10 @@ class Engine:
         """Set trade execution callback: async def execute(signal: Signal) -> Trade | None"""
         self.execute_callback = callback
 
-    def set_db(self, callback):
-        """Set DB logging callback: async def log_trade(trade: Trade, pnl: float)"""
+    def set_db(self, callback, db_instance=None):
+        """Set DB logging callback and optional DB instance for state persistence."""
         self.db_callback = callback
+        self._db = db_instance
 
     async def run(self):
         self._running = True
@@ -100,32 +108,33 @@ class Engine:
         if self.mode == "paper":
             await self._paper_execute(sig)
         elif self.execute_callback:
-            trade = await self.execute_callback(sig)
-            if trade:
-                # Update portfolio (detect close by opposite-side position)
-                should_close = sig.metadata.get("close", False)
-                if not should_close:
-                    pos_key = self.portfolio._position_key(trade.platform, trade.market_id, trade.strategy)
-                    existing = self.portfolio.positions.get(pos_key)
-                    if existing and existing.side != trade.side:
-                        should_close = True
+            result = await self.execute_callback(sig)
+            if not result:
+                return
 
-                if should_close:
-                    pnl = await self.portfolio.close_position(trade)
-                else:
-                    await self.portfolio.open_position(trade)
-                    pnl = 0.0
+            order_id = result.get("order_id", "")
+            if not order_id:
+                return
 
-                await self._record_trade(trade, pnl=pnl)
-                await self._notify_trade(trade, pnl)
-                self._notify_strategy_fill(sig, trade)
+            # Register pending order — portfolio update happens in handle_fill
+            self._register_pending(sig, result)
+
+            # Tell strategy to track this order (adds to _active_orders for lifecycle)
+            runner = self.strategies.get(sig.strategy)
+            if runner and hasattr(runner.strategy, "track_order"):
+                runner.strategy.track_order(
+                    order_id=order_id,
+                    token_id=result.get("token_id", sig.metadata.get("token_id", sig.market_id)),
+                    side=sig.direction,
+                    price=sig.price,
+                    size=sig.metadata.get("shares", sig.size_usd / max(sig.price, 0.01)),
+                    size_usd=sig.size_usd,
+                )
         else:
             logger.warning("No executor set, skipping signal: %s", sig)
 
     async def _paper_execute(self, sig: Signal):
         """Simulate execution in paper mode (instant fill at signal price)."""
-        from core.portfolio import Platform, Side, Trade
-        import time
         import uuid
 
         # For Polymarket use token_id as position key so each token tracks separately
@@ -139,7 +148,7 @@ class Engine:
             side=Side.BUY if sig.direction == "buy" else Side.SELL,
             price=sig.price,
             size=sig.size_usd,
-            fee=sig.metadata.get("fee") or sig.size_usd * 0.02,  # use strategy fee, or 2% if zero/missing
+            fee=sig.metadata.get("fee") or sig.size_usd * self._paper_fee_rate,
             slippage=0.0,
             strategy=sig.strategy,
             timestamp=time.time(),
@@ -169,12 +178,22 @@ class Engine:
 
         if self.db_callback:
             await self.db_callback(trade, pnl)
+        await self._save_portfolio_state()
 
     async def _record_trade(self, trade, pnl: float = 0.0):
         await self.risk_manager.record_trade(trade, filled=True, pnl=pnl)
         if self.db_callback:
             await self.db_callback(trade, pnl)
+        await self._save_portfolio_state()
         return pnl
+
+    async def _save_portfolio_state(self):
+        """Persist portfolio state to DB after each trade."""
+        if self._db:
+            try:
+                await self._db.save_state("portfolio", self.portfolio.to_dict())
+            except Exception:
+                logger.exception("Failed to save portfolio state")
 
     def _notify_strategy_fill(self, sig: Signal, trade):
         """Notify the originating strategy about a fill (for inventory tracking)."""
@@ -206,6 +225,111 @@ class Engine:
         if pnl != 0:
             msg += f" | PnL: ${pnl:+.2f}"
         await self.notify_callback(msg)
+
+    # --- Live mode: pending orders and fill reconciliation ---
+
+    def _register_pending(self, sig: Signal, order_result: dict):
+        """Track a live order as pending until fill arrives via user WS."""
+        order_id = order_result.get("order_id", "")
+        if not order_id:
+            return
+        self._pending_orders[order_id] = {
+            "sig": sig,
+            "order_id": order_id,
+            "token_id": order_result.get("token_id", sig.metadata.get("token_id", sig.market_id)),
+            "side": sig.direction,
+            "price": sig.price,
+            "size_usd": sig.size_usd,
+            "placed_at": time.time(),
+        }
+        logger.info("Pending order registered: %s %s $%.0f @ %.4f (id: %s)",
+                     sig.direction, sig.symbol, sig.size_usd, sig.price, order_id[:12])
+
+    async def handle_fill(self, fill_data: dict):
+        """Called by user WS when a trade/fill event arrives.
+
+        Matches against pending orders, creates Trade, updates portfolio.
+        """
+        event_type = fill_data.get("event_type", "")
+
+        # Only process trade events (not order placements/cancellations)
+        if event_type != "trade":
+            return
+
+        status = fill_data.get("status", "")
+        if status not in ("MATCHED", "MINED", "CONFIRMED"):
+            return
+
+        # Extract order IDs from the fill — check maker_orders and taker_order_id
+        matched_orders = []
+        for maker in fill_data.get("maker_orders", []):
+            mid = maker.get("order_id", "")
+            if mid in self._pending_orders:
+                matched_orders.append((mid, maker))
+
+        taker_id = fill_data.get("taker_order_id", "")
+        if taker_id in self._pending_orders:
+            matched_orders.append((taker_id, {
+                "order_id": taker_id,
+                "matched_amount": fill_data.get("size", "0"),
+                "price": fill_data.get("price", "0"),
+            }))
+
+        if not matched_orders:
+            return  # not our order
+
+        for order_id, fill_info in matched_orders:
+            pending = self._pending_orders.pop(order_id)
+            sig = pending["sig"]
+            filled_shares = float(fill_info.get("matched_amount", 0))
+            filled_price = float(fill_info.get("price", pending["price"]))
+            filled_usd = filled_shares * filled_price
+
+            if filled_shares <= 0:
+                continue
+
+            trade = Trade(
+                trade_id=order_id,
+                platform=Platform.POLYMARKET,
+                market_id=pending["token_id"],
+                symbol=sig.symbol,
+                side=Side.BUY if sig.direction == "buy" else Side.SELL,
+                price=filled_price,
+                size=filled_usd,
+                fee=sig.metadata.get("fee", 0.0),
+                slippage=abs(filled_price - sig.price),
+                strategy=sig.strategy,
+                timestamp=time.time(),
+                latency_ms=(time.time() - pending["placed_at"]) * 1000,
+            )
+
+            # Update portfolio
+            pnl = 0.0
+            should_close = sig.metadata.get("close", False)
+            if not should_close:
+                pos_key = self.portfolio._position_key(trade.platform, trade.market_id, trade.strategy)
+                existing = self.portfolio.positions.get(pos_key)
+                if existing and existing.side != trade.side:
+                    should_close = True
+
+            if should_close:
+                pnl = await self.portfolio.close_position(trade)
+            else:
+                await self.portfolio.open_position(trade)
+
+            # Notify strategy (update MM inventory)
+            runner = self.strategies.get(sig.strategy)
+            if runner and hasattr(runner.strategy, "on_fill"):
+                runner.strategy.on_fill(order_id, filled_shares, filled_price)
+
+            await self.risk_manager.record_trade(trade, filled=True, pnl=pnl)
+            await self._notify_trade(trade, pnl)
+            if self.db_callback:
+                await self.db_callback(trade, pnl)
+            await self._save_portfolio_state()
+
+            logger.info("Fill reconciled: %s %s $%.2f @ %.4f (order: %s)",
+                        sig.direction, sig.symbol, filled_usd, filled_price, order_id[:12])
 
     async def _daily_reset_loop(self):
         """Reset daily risk counters at midnight UTC."""

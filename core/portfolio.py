@@ -215,3 +215,48 @@ class Portfolio:
             "open_positions": len(self.positions),
             "closed_trades": len(self.closed_trades),
         }
+
+    # --- Persistence ---
+
+    def to_dict(self) -> dict:
+        """Serialize portfolio state for DB persistence."""
+        return {
+            "cash": self.cash,
+            "realized_pnl": self.realized_pnl,
+            "total_fees": self.total_fees,
+            "total_llm_cost": self.total_llm_cost,
+            "positions": {
+                key: {
+                    "platform": p.platform.value,
+                    "market_id": p.market_id,
+                    "symbol": p.symbol,
+                    "side": p.side.value,
+                    "avg_price": p.avg_price,
+                    "size": p.size,
+                    "strategy": p.strategy,
+                    "fees_paid": p.fees_paid,
+                    "current_price": p.current_price,
+                }
+                for key, p in self.positions.items()
+            },
+        }
+
+    def restore_from(self, data: dict):
+        """Restore portfolio state from persisted dict. Keeps initial_capital."""
+        self.cash = data.get("cash", self.initial_capital)
+        self.realized_pnl = data.get("realized_pnl", 0.0)
+        self.total_fees = data.get("total_fees", 0.0)
+        self.total_llm_cost = data.get("total_llm_cost", 0.0)
+        self.positions.clear()
+        for key, p in data.get("positions", {}).items():
+            self.positions[key] = Position(
+                platform=Platform(p["platform"]),
+                market_id=p["market_id"],
+                symbol=p["symbol"],
+                side=Side(p["side"]),
+                avg_price=p["avg_price"],
+                size=p["size"],
+                strategy=p["strategy"],
+                fees_paid=p.get("fees_paid", 0.0),
+                current_price=p.get("current_price", 0.0),
+            )

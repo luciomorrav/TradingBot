@@ -332,10 +332,12 @@ class PolymarketClient:
                 async with self._session.ws_connect(WS_USER, heartbeat=30) as ws:
                     self._ws_user = ws
                     await ws.send_json({
+                        "auth": {
+                            "apiKey": self._api_key,
+                            "secret": self._api_secret,
+                            "passphrase": self._api_passphrase,
+                        },
                         "type": "user",
-                        "apiKey": self._api_key,
-                        "secret": self._api_secret,
-                        "passphrase": self._api_passphrase,
                     })
                     logger.info("User WS connected")
 
@@ -358,8 +360,15 @@ class PolymarketClient:
             data = json.loads(raw_data)
         except json.JSONDecodeError:
             return
-        if self._on_trade and data.get("event_type") in ("trade", "order"):
-            await self._on_trade(data)
+
+        event_type = data.get("event_type", "")
+        if event_type in ("trade", "order"):
+            logger.info("User WS event: %s (status=%s, asset=%s)",
+                        event_type, data.get("status", "?"), data.get("asset_id", "?")[:12])
+            if self._on_trade:
+                await self._on_trade(data)
+        elif event_type:
+            logger.debug("User WS event ignored: %s", event_type)
 
     # --- Order placement (REST) ---
 

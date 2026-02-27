@@ -93,6 +93,7 @@ class PolyMarketMaker(BaseStrategy):
 
         self.market_states: dict[str, MarketState] = {}  # token_id -> state
         self._active_orders: dict[str, LiveOrder] = {}    # order_id -> LiveOrder
+        self._db = None  # set by main.py for inventory persistence
 
     async def run_cycle(self) -> list[Signal]:
         """Override base class — MM manages its own risk inside evaluate().
@@ -129,6 +130,9 @@ class PolyMarketMaker(BaseStrategy):
                     fee_rate=market.fee,
                 )
 
+        # Restore saved inventory (if tokens match)
+        await self._restore_inventory()
+
         self.client.on_book_update(self._on_book_update)
         await self.client.subscribe_market(token_ids)
         self.logger.info("Market maker active on %d tokens across %d markets", len(token_ids), len(selected))
@@ -139,7 +143,37 @@ class PolyMarketMaker(BaseStrategy):
     async def on_stop(self):
         # Cancel all live orders before stopping
         await self._cancel_all_live_orders()
+        await self._save_inventory()
         self.logger.info("Market maker stopped")
+
+    async def _save_inventory(self):
+        """Persist per-token inventory to DB."""
+        if not self._db:
+            return
+        inv = {tid: s.inventory for tid, s in self.market_states.items() if s.inventory != 0}
+        try:
+            await self._db.save_state("mm_inventory", inv)
+            self.logger.info("Saved inventory for %d tokens", len(inv))
+        except Exception:
+            self.logger.exception("Failed to save MM inventory")
+
+    async def _restore_inventory(self):
+        """Restore per-token inventory from DB."""
+        if not self._db:
+            return
+        try:
+            saved = await self._db.load_state("mm_inventory")
+            if not saved:
+                return
+            restored = 0
+            for tid, inv in saved.items():
+                if tid in self.market_states:
+                    self.market_states[tid].inventory = inv
+                    restored += 1
+            if restored:
+                self.logger.info("Restored inventory for %d/%d tokens", restored, len(saved))
+        except Exception:
+            self.logger.exception("Failed to restore MM inventory")
 
     async def evaluate(self) -> list[Signal]:
         signals: list[Signal] = []

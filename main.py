@@ -39,14 +39,24 @@ async def main():
 
     # --- Core ---
     portfolio = Portfolio(capital_usd=capital)
-    risk_config = RiskConfig.from_dict(config.get("risk", {}))
-    risk_manager = RiskManager(portfolio, risk_config)
-    engine = Engine(portfolio, risk_manager, config)
 
     # --- Database ---
     db = Database()
     await db.connect()
-    engine.set_db(db.log_trade)
+
+    # Restore portfolio state if available
+    saved_portfolio = await db.load_state("portfolio")
+    if saved_portfolio:
+        portfolio.restore_from(saved_portfolio)
+        logger.info(
+            "Restored portfolio: %d positions, $%.2f cash, PnL $%.2f",
+            len(portfolio.positions), portfolio.cash, portfolio.realized_pnl,
+        )
+
+    risk_config = RiskConfig.from_dict(config.get("risk", {}))
+    risk_manager = RiskManager(portfolio, risk_config)
+    engine = Engine(portfolio, risk_manager, config)
+    engine.set_db(db.log_trade, db_instance=db)
 
     # --- Telegram ---
     tg = TelegramBot(config.get("telegram", {}), engine=engine)
@@ -65,6 +75,7 @@ async def main():
         config=config.get("polymarket", {}),
         poly_client=poly_client,
     )
+    mm._db = db
     engine.add_strategy(mm, interval_seconds=5.0)
 
     # --- IB connector + pairs trading (paper only in Phase 1) ---
@@ -86,7 +97,11 @@ async def main():
         router.register("polymarket", poly_client)
         router.register("ib", ib_client)
         engine.set_executor(router.execute)
-        logger.info("Live execution router active (Polymarket + IB)")
+
+        # Wire user WS for fill reconciliation
+        poly_client.on_trade(engine.handle_fill)
+        await poly_client.subscribe_user()
+        logger.info("Live execution router active (Polymarket + IB) with user WS")
 
     logger.info("Starting bot in %s mode with $%.0f capital", mode, capital)
 
