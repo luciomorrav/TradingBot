@@ -75,6 +75,7 @@ class RiskManager:
         self.strategy_paused: dict[str, float] = {}  # strategy -> resume_timestamp
         self.consecutive_losses: dict[str, int] = {}  # strategy -> count
         self.execution_metrics: dict[str, ExecutionMetrics] = {}  # strategy -> metrics
+        self.exempt_strategies: set[str] = set()  # strategies that bypass loss cooldown
         self.daily_start_equity: float = portfolio.equity
         self._lock = asyncio.Lock()
 
@@ -162,13 +163,14 @@ class RiskManager:
                 latency_ms=trade.latency_ms,
             )
 
-            # Track consecutive losses
-            if pnl < 0:
-                self.consecutive_losses[strategy] = self.consecutive_losses.get(strategy, 0) + 1
-                if self.consecutive_losses[strategy] >= self.config.consecutive_loss_cooldown:
-                    await self._pause_strategy(strategy)
-            elif pnl > 0:
-                self.consecutive_losses[strategy] = 0
+            # Track consecutive losses (skip for strategies that manage their own risk)
+            if strategy not in self.exempt_strategies:
+                if pnl < 0:
+                    self.consecutive_losses[strategy] = self.consecutive_losses.get(strategy, 0) + 1
+                    if self.consecutive_losses[strategy] >= self.config.consecutive_loss_cooldown:
+                        await self._pause_strategy(strategy)
+                elif pnl > 0:
+                    self.consecutive_losses[strategy] = 0
 
     # --- Kill switch and cooldown ---
 

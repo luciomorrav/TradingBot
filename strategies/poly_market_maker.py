@@ -71,6 +71,9 @@ class PolyMarketMaker(BaseStrategy):
         self.client = poly_client
         self.mm_config = config.get("market_maker", {})
 
+        # MM manages its own risk — exempt from consecutive-loss cooldown
+        risk_manager.exempt_strategies.add(name)
+
         self.target_spread = self.mm_config.get("target_spread", 0.02)
         self.max_inventory = self.mm_config.get("max_inventory", 200)
         self.repost_threshold = self.mm_config.get("repost_threshold", 0.02)
@@ -215,10 +218,10 @@ class PolyMarketMaker(BaseStrategy):
                     },
                 ))
             elif bid_price > 0.01 and inventory_usd < self.max_inventory:
-                # BUY — subject to risk limits (increases exposure)
-                size = self.risk_manager.suggest_position_size(
-                    self.name, base_size, volatility=state.volatility,
-                )
+                # BUY — MM manages its own risk (max_inventory per token).
+                # Don't use suggest_position_size: its exposure cap (60%)
+                # returns 0 when total exposure is high, deadlocking the MM.
+                size = min(base_size, self.portfolio.cash)
                 if size < 1:
                     continue
                 shares_bid = size / max(bid_price, 0.01)
