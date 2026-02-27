@@ -212,8 +212,8 @@ async def test_portfolio_netting_opposite_side_closes(portfolio):
     pos_key = list(portfolio.positions.keys())[0]
     assert portfolio.positions[pos_key].size == 20
 
-    # Sell same market — should close, not add
-    sell = _make_trade(strategy="mm", price=0.50, size=20, side="sell")
+    # Sell ALL 50 shares at $0.50 = $25 notional (not $20 — different price means different notional)
+    sell = _make_trade(strategy="mm", price=0.50, size=25, side="sell")
     sell.market_id = "token_123"
     pnl = await portfolio.close_position(sell)
 
@@ -228,6 +228,7 @@ async def test_portfolio_netting_partial_close(portfolio):
     buy.market_id = "token_123"
     await portfolio.open_position(buy)
 
+    # Sell $15 @ $0.50 = 30 shares closed → remaining = 70 shares * $0.40 = $28
     sell = _make_trade(strategy="mm", price=0.50, size=15, side="sell")
     sell.market_id = "token_123"
     pnl = await portfolio.close_position(sell)
@@ -235,4 +236,4 @@ async def test_portfolio_netting_partial_close(portfolio):
     assert pnl > 0
     assert len(portfolio.positions) == 1
     remaining = list(portfolio.positions.values())[0]
-    assert remaining.size == 25  # 40 - 15
+    assert remaining.size == pytest.approx(28.0, abs=0.1)  # 70 shares * $0.40

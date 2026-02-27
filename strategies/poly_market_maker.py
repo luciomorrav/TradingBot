@@ -205,9 +205,8 @@ class PolyMarketMaker(BaseStrategy):
             if self._has_live_orders(tid):
                 continue
 
-            # Skip if spread is too tight (can't profit)
-            min_spread = max(self.target_spread, state.fee_rate * 2 + 0.01)
-            if book.spread < min_spread:
+            # Skip if spread is too tight — A-S model handles fee adjustment internally
+            if book.spread < self.target_spread:
                 continue
 
             # Check for informed flow
@@ -251,6 +250,7 @@ class PolyMarketMaker(BaseStrategy):
                         "fee": state.fee_rate * size,
                     },
                 ))
+                state.last_quote_time = now
             elif bid_price > 0.01 and inventory_usd < self.max_inventory:
                 # BUY — MM manages its own risk (max_inventory per token).
                 # Don't use suggest_position_size: its exposure cap (60%)
@@ -274,8 +274,7 @@ class PolyMarketMaker(BaseStrategy):
                         "fee": state.fee_rate * size,
                     },
                 ))
-
-            state.last_quote_time = now
+                state.last_quote_time = now
 
         if signals:
             self.logger.info("Generated %d signals this cycle", len(signals))

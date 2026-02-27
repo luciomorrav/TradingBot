@@ -98,8 +98,8 @@ async def main():
         router.register("ib", ib_client)
         engine.set_executor(router.execute)
 
-        # Wire user WS for fill reconciliation
-        poly_client.on_trade(engine.handle_fill)
+        # Wire user WS for fill reconciliation (dedicated callback, not shared with market WS)
+        poly_client.on_user_trade(engine.handle_fill)
         await poly_client.subscribe_user()
         logger.info("Live execution router active (Polymarket + IB) with user WS")
 

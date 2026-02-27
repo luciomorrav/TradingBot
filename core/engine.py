@@ -38,6 +38,7 @@ class Engine:
         self._running = False
         self._tasks: list[asyncio.Task] = []
         self._pending_orders: dict[str, dict] = {}  # order_id → {sig, token_id, side, ...}
+        self._fill_lock = asyncio.Lock()  # serialize fill processing
 
         # Paper mode fee rate — configurable via polymarket.paper_fee_rate
         poly_cfg = config.get("polymarket", {})
@@ -83,6 +84,9 @@ class Engine:
 
         # Heartbeat task
         self._tasks.append(asyncio.create_task(self._heartbeat_loop(), name="heartbeat"))
+
+        # Pending order cleanup task (live mode)
+        self._tasks.append(asyncio.create_task(self._pending_order_cleanup_loop(), name="pending_cleanup"))
 
         try:
             await asyncio.gather(*self._tasks)
@@ -148,7 +152,7 @@ class Engine:
             side=Side.BUY if sig.direction == "buy" else Side.SELL,
             price=sig.price,
             size=sig.size_usd,
-            fee=sig.metadata.get("fee") or sig.size_usd * self._paper_fee_rate,
+            fee=sig.metadata.get("fee") if sig.metadata.get("fee") is not None else sig.size_usd * self._paper_fee_rate,
             slippage=0.0,
             strategy=sig.strategy,
             timestamp=time.time(),
@@ -179,13 +183,6 @@ class Engine:
         if self.db_callback:
             await self.db_callback(trade, pnl)
         await self._save_portfolio_state()
-
-    async def _record_trade(self, trade, pnl: float = 0.0):
-        await self.risk_manager.record_trade(trade, filled=True, pnl=pnl)
-        if self.db_callback:
-            await self.db_callback(trade, pnl)
-        await self._save_portfolio_state()
-        return pnl
 
     async def _save_portfolio_state(self):
         """Persist portfolio state to DB after each trade."""
@@ -249,15 +246,22 @@ class Engine:
         """Called by user WS when a trade/fill event arrives.
 
         Matches against pending orders, creates Trade, updates portfolio.
+        Serialized via _fill_lock to prevent race conditions.
         """
+        async with self._fill_lock:
+            await self._handle_fill_inner(fill_data)
+
+    async def _handle_fill_inner(self, fill_data: dict):
         event_type = fill_data.get("event_type", "")
 
         # Only process trade events (not order placements/cancellations)
         if event_type != "trade":
             return
 
+        # Only process MATCHED status — MINED/CONFIRMED are duplicate events
+        # for the same fill as it progresses through the blockchain lifecycle.
         status = fill_data.get("status", "")
-        if status not in ("MATCHED", "MINED", "CONFIRMED"):
+        if status != "MATCHED":
             return
 
         # Extract order IDs from the fill — check maker_orders and taker_order_id
@@ -279,7 +283,9 @@ class Engine:
             return  # not our order
 
         for order_id, fill_info in matched_orders:
-            pending = self._pending_orders.pop(order_id)
+            pending = self._pending_orders.get(order_id)
+            if not pending:
+                continue
             sig = pending["sig"]
             filled_shares = float(fill_info.get("matched_amount", 0))
             filled_price = float(fill_info.get("price", pending["price"]))
@@ -288,8 +294,15 @@ class Engine:
             if filled_shares <= 0:
                 continue
 
+            # Track cumulative fill for partial fill support
+            pending.setdefault("filled_so_far", 0.0)
+            pending["filled_so_far"] += filled_shares
+            original_shares = pending["size_usd"] / max(pending["price"], 0.01)
+            if pending["filled_so_far"] >= original_shares * 0.99:
+                del self._pending_orders[order_id]
+
             trade = Trade(
-                trade_id=order_id,
+                trade_id=f"{order_id}_{int(time.time())}",
                 platform=Platform.POLYMARKET,
                 market_id=pending["token_id"],
                 symbol=sig.symbol,
@@ -328,8 +341,9 @@ class Engine:
                 await self.db_callback(trade, pnl)
             await self._save_portfolio_state()
 
-            logger.info("Fill reconciled: %s %s $%.2f @ %.4f (order: %s)",
-                        sig.direction, sig.symbol, filled_usd, filled_price, order_id[:12])
+            logger.info("Fill reconciled: %s %s $%.2f @ %.4f (order: %s, filled: %.1f/%.1f)",
+                        sig.direction, sig.symbol, filled_usd, filled_price, order_id[:12],
+                        pending.get("filled_so_far", filled_shares), original_shares)
 
     async def _daily_reset_loop(self):
         """Reset daily risk counters at midnight UTC."""
@@ -367,9 +381,31 @@ class Engine:
             except Exception:
                 logger.exception("Error in heartbeat loop")
 
+    async def _pending_order_cleanup_loop(self):
+        """Remove stale pending orders that never filled (live mode)."""
+        while self._running:
+            try:
+                await asyncio.sleep(60)
+                now = time.time()
+                stale = [oid for oid, p in self._pending_orders.items()
+                         if now - p["placed_at"] > 300]  # 5 min TTL
+                for oid in stale:
+                    del self._pending_orders[oid]
+                    logger.warning("Pending order expired (no fill after 5min): %s", oid[:12])
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Error in pending order cleanup")
+
     async def _shutdown(self):
         logger.info("Engine shutting down...")
         self._running = False
+
+        # Clear pending orders — strategies' on_stop() cancels live orders on exchange
+        if self._pending_orders:
+            logger.info("Clearing %d pending orders on shutdown", len(self._pending_orders))
+            self._pending_orders.clear()
+
         for _, runner in self.strategies.items():
             try:
                 await runner.strategy.on_stop()

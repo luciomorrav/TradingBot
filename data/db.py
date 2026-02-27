@@ -70,6 +70,7 @@ class Database:
         self._db = await aiosqlite.connect(self._path)
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA synchronous=NORMAL")
+        await self._db.execute("PRAGMA busy_timeout=5000")
         await self._db.executescript(SCHEMA)
         await self._db.commit()
 

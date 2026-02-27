@@ -114,18 +114,23 @@ class Portfolio:
             if not pos:
                 return 0.0
 
-            close_size = min(trade.size, pos.size)
+            # Work in shares to handle partial closes correctly
+            trade_shares = trade.size / max(trade.price, 0.01)
+            pos_shares = pos.size / max(pos.avg_price, 0.01)
+            close_shares = min(trade_shares, pos_shares)
+
             if pos.side == Side.BUY:
-                pnl = (trade.price - pos.avg_price) / pos.avg_price * close_size
+                pnl = (trade.price - pos.avg_price) * close_shares
             else:
-                pnl = (pos.avg_price - trade.price) / pos.avg_price * close_size
+                pnl = (pos.avg_price - trade.price) * close_shares
 
             pnl -= trade.fee
             self.realized_pnl += pnl
-            self.cash += close_size + pnl
+            self.cash += close_shares * trade.price  # actual sale proceeds
             self.total_fees += trade.fee
 
-            pos.size -= close_size
+            cost_basis_removed = close_shares * pos.avg_price
+            pos.size -= cost_basis_removed
             if pos.size <= 0.01:  # dust threshold
                 del self.positions[key]
 

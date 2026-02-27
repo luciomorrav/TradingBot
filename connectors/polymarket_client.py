@@ -115,6 +115,7 @@ class PolymarketClient:
 
         self._on_book_update: Optional[Callable] = None
         self._on_trade: Optional[Callable] = None
+        self._on_user_trade: Optional[Callable] = None
 
         self._running = False
 
@@ -180,6 +181,10 @@ class PolymarketClient:
 
     def on_trade(self, callback: Callable):
         self._on_trade = callback
+
+    def on_user_trade(self, callback: Callable):
+        """Set callback for user WS fill/order events (separate from market trades)."""
+        self._on_user_trade = callback
 
     # --- Market discovery (REST, call sparingly: 60 req/min) ---
 
@@ -365,8 +370,8 @@ class PolymarketClient:
         if event_type in ("trade", "order"):
             logger.info("User WS event: %s (status=%s, asset=%s)",
                         event_type, data.get("status", "?"), data.get("asset_id", "?")[:12])
-            if self._on_trade:
-                await self._on_trade(data)
+            if self._on_user_trade:
+                await self._on_user_trade(data)
         elif event_type:
             logger.debug("User WS event ignored: %s", event_type)
 

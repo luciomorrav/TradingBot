@@ -425,7 +425,7 @@ async def test_handle_fill_reconciles_pending():
     engine._register_pending(sig, {"order_id": "ord_123", "token_id": "tok1"})
     assert "ord_123" in engine._pending_orders
 
-    # Simulate fill event (we are the maker)
+    # Simulate full fill event (we are the maker, 42 shares = $21 / $0.50)
     fill_data = {
         "event_type": "trade",
         "asset_id": "tok1",
@@ -439,7 +439,133 @@ async def test_handle_fill_reconciles_pending():
     }
     await engine.handle_fill(fill_data)
 
-    # Pending order should be consumed
+    # Pending order should be consumed (42 shares >= 42 shares * 0.99)
     assert "ord_123" not in engine._pending_orders
     # Portfolio should have an open position
     assert len(portfolio.positions) == 1
+
+
+@pytest.mark.asyncio
+async def test_handle_fill_dedup_ignores_mined():
+    """MINED/CONFIRMED events for the same fill should be ignored (only MATCHED processed)."""
+    from core.portfolio import Portfolio
+    from core.risk_manager import RiskConfig, RiskManager
+    from core.engine import Engine
+
+    portfolio = Portfolio(capital_usd=500)
+    rm = RiskManager(portfolio, RiskConfig())
+    engine = Engine(portfolio, rm, {"general": {"mode": "live"}})
+
+    sig = Signal(
+        strategy="poly_mm", market_id="m1", symbol="Yes",
+        direction="buy", size_usd=21.0, price=0.50,
+        metadata={"token_id": "tok1", "platform": "polymarket"},
+    )
+    engine._register_pending(sig, {"order_id": "ord_456", "token_id": "tok1"})
+
+    base_fill = {
+        "event_type": "trade",
+        "asset_id": "tok1",
+        "maker_orders": [
+            {"order_id": "ord_456", "matched_amount": "42.0", "price": "0.50"},
+        ],
+        "taker_order_id": "taker_xyz",
+        "side": "SELL",
+        "size": "42.0",
+    }
+
+    # First: MATCHED — should process
+    await engine.handle_fill({**base_fill, "status": "MATCHED"})
+    assert len(portfolio.positions) == 1
+
+    # Second: MINED — should be ignored (not MATCHED)
+    await engine.handle_fill({**base_fill, "status": "MINED"})
+    # Portfolio still has exactly 1 position (not doubled)
+    pos = list(portfolio.positions.values())[0]
+    assert pos.size == pytest.approx(21.0, abs=0.5)
+
+
+@pytest.mark.asyncio
+async def test_handle_fill_partial_keeps_pending():
+    """A partial fill should keep the pending order until fully filled."""
+    from core.portfolio import Portfolio
+    from core.risk_manager import RiskConfig, RiskManager
+    from core.engine import Engine
+
+    portfolio = Portfolio(capital_usd=500)
+    rm = RiskManager(portfolio, RiskConfig())
+    engine = Engine(portfolio, rm, {"general": {"mode": "live"}})
+
+    sig = Signal(
+        strategy="poly_mm", market_id="m1", symbol="Yes",
+        direction="buy", size_usd=21.0, price=0.50,
+        metadata={"token_id": "tok1", "platform": "polymarket"},
+    )
+    engine._register_pending(sig, {"order_id": "ord_789", "token_id": "tok1"})
+
+    # First partial fill: 20 of 42 shares
+    fill_1 = {
+        "event_type": "trade",
+        "asset_id": "tok1",
+        "status": "MATCHED",
+        "maker_orders": [
+            {"order_id": "ord_789", "matched_amount": "20.0", "price": "0.50"},
+        ],
+        "taker_order_id": "taker_a",
+        "side": "SELL",
+        "size": "20.0",
+    }
+    await engine.handle_fill(fill_1)
+    # Pending order should still exist (20 < 42 * 0.99)
+    assert "ord_789" in engine._pending_orders
+
+    # Second partial fill: remaining 22 shares
+    fill_2 = {
+        "event_type": "trade",
+        "asset_id": "tok1",
+        "status": "MATCHED",
+        "maker_orders": [
+            {"order_id": "ord_789", "matched_amount": "22.0", "price": "0.50"},
+        ],
+        "taker_order_id": "taker_b",
+        "side": "SELL",
+        "size": "22.0",
+    }
+    await engine.handle_fill(fill_2)
+    # Now fully filled — should be removed
+    assert "ord_789" not in engine._pending_orders
+
+
+@pytest.mark.asyncio
+async def test_close_position_partial_pnl():
+    """Partial close should calculate PnL correctly using shares, not USD notional."""
+    from core.portfolio import Portfolio, Platform, Side, Trade
+    import time as _time
+
+    p = Portfolio(capital_usd=500)
+
+    # Open: buy 100 shares at $0.50 → $50 notional
+    buy = Trade(
+        trade_id="buy1", platform=Platform.POLYMARKET, market_id="tok1",
+        symbol="Yes", side=Side.BUY, price=0.50, size=50.0, fee=0.0,
+        strategy="test", timestamp=_time.time(),
+    )
+    await p.open_position(buy)
+    assert p.cash == pytest.approx(450.0, abs=0.01)
+
+    # Partial close: sell 50 shares at $0.60 → $30 notional
+    sell = Trade(
+        trade_id="sell1", platform=Platform.POLYMARKET, market_id="tok1",
+        symbol="Yes", side=Side.SELL, price=0.60, size=30.0, fee=0.0,
+        strategy="test", timestamp=_time.time(),
+    )
+    pnl = await p.close_position(sell)
+
+    # 50 shares * (0.60 - 0.50) = $5.00 PnL
+    assert pnl == pytest.approx(5.0, abs=0.01)
+    # Cash: 450 + 50 shares * 0.60 = 450 + 30 = 480
+    assert p.cash == pytest.approx(480.0, abs=0.01)
+    # Remaining position: 50 shares at $0.50 = $25 cost basis
+    assert len(p.positions) == 1
+    pos = list(p.positions.values())[0]
+    assert pos.size == pytest.approx(25.0, abs=0.5)
