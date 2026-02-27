@@ -427,8 +427,8 @@ class PolyMarketMaker(BaseStrategy):
     def _score_market(self, market: Market) -> float:
         """Score a market 0-1 for MM suitability.
 
-        Weighted factors: spread potential (35%), depth (20%), volume (20%),
-        mid-price balance (15%), time to expiry (10%).
+        Weighted factors: price balance (40%), depth (25%), volume (25%),
+        time to expiry (10%).
         """
         cfg = self.mm_config.get("scoring", {})
 
@@ -437,9 +437,9 @@ class PolyMarketMaker(BaseStrategy):
         prices = [t.get("price", 0.5) for t in market.tokens if t.get("price")]
         best_balance = min((abs(p - 0.5) for p in prices), default=0.0) if prices else 0.0
 
-        # 1. Spread potential — markets near 50/50 have wider natural spreads
+        # 1. Price balance — markets near 50/50 have wider spreads + more two-way flow
         #    Already 0-1: 1.0 at 50/50, 0.1 at 95/5
-        spread_potential = 1.0 - 2 * best_balance
+        balance_score = 1.0 - 2 * best_balance
 
         # 2. Depth — more liquidity = less slippage
         depth_target = cfg.get("depth_target", 500)
@@ -449,19 +449,15 @@ class PolyMarketMaker(BaseStrategy):
         volume_target = cfg.get("volume_target", 2000)
         volume_score = min(market.volume / max(volume_target, 1), 1.0)
 
-        # 4. Mid price range — prefer tokens near 0.2-0.8 (more two-way flow)
-        mid_price_score = 1.0 - 2 * best_balance
-
-        # 5. Time to expiry — prefer > 7 days remaining
+        # 4. Time to expiry — prefer > 7 days remaining
         hours = self._hours_to_expiry(market.end_date)
         expiry_score = min(hours / 168, 1.0) if hours > 0 else 0.5
 
         w = cfg.get("weights", {})
         score = (
-            w.get("spread", 0.35) * spread_potential
-            + w.get("depth", 0.20) * depth_score
-            + w.get("volume", 0.20) * volume_score
-            + w.get("mid_price", 0.15) * mid_price_score
+            w.get("balance", 0.40) * balance_score
+            + w.get("depth", 0.25) * depth_score
+            + w.get("volume", 0.25) * volume_score
             + w.get("expiry", 0.10) * expiry_score
         )
         return round(score, 4)

@@ -316,7 +316,7 @@ def test_score_market_extreme_price():
     score_extreme = mm._score_market(m_extreme)
     score_balanced = mm._score_market(m_balanced)
     assert score_extreme < score_balanced, "Extreme-price market should score lower"
-    assert score_extreme < 0.6, f"Extreme-price score {score_extreme} should be < 0.6"
+    assert score_extreme < 0.7, f"Extreme-price score {score_extreme} should be < 0.7"
 
 
 def test_select_markets_ordering():
