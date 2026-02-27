@@ -24,6 +24,7 @@ class TelegramBot:
 
         self._app: Optional[Application] = None
         self._running = False
+        self._reset_pending_at: Optional[float] = None  # timestamp of pending reset
 
     def set_engine(self, engine):
         self.engine = engine
@@ -177,29 +178,35 @@ class TelegramBot:
             await update.message.reply_text("Reset only available in paper mode.")
             return
 
-        args = context.args or []
-        if "confirm" not in args:
+        import time
+        now = time.time()
+        CONFIRM_WINDOW = 30  # seconds to confirm
+
+        if self._reset_pending_at and now - self._reset_pending_at < CONFIRM_WINDOW:
+            # Second /reset within window → execute
+            self._reset_pending_at = None
+            before = self.engine.portfolio.summary()
+            await self.engine.reset_paper()
+            after = self.engine.portfolio.summary()
+            await update.message.reply_text(
+                f"✅ <b>Paper portfolio reset</b>\n"
+                f"Before: equity ${before['equity']:.2f}, {before['open_positions']} positions\n"
+                f"After:  equity ${after['equity']:.2f}, cash ${after['cash']:.2f}",
+                parse_mode="HTML",
+            )
+        else:
+            # First /reset → show warning and arm the confirmation
+            self._reset_pending_at = now
             s = self.engine.portfolio.summary()
             await update.message.reply_text(
                 f"⚠️ <b>Reset paper portfolio?</b>\n"
                 f"Current equity: ${s['equity']:.2f} (PnL: ${s['equity_pnl']:+.2f})\n"
                 f"Positions: {s['open_positions']} | Fees: ${s['total_fees']:.2f}\n\n"
-                f"This resets cash to ${self.engine.portfolio.initial_capital:.0f}, "
-                f"clears all positions and PnL counters.\n\n"
-                f"Type /reset confirm to proceed.",
+                f"Cash will reset to ${self.engine.portfolio.initial_capital:.0f}, "
+                f"all positions and PnL counters cleared.\n\n"
+                f"Send /reset again within {CONFIRM_WINDOW}s to confirm.",
                 parse_mode="HTML",
             )
-            return
-
-        before = self.engine.portfolio.summary()
-        await self.engine.reset_paper()
-        after = self.engine.portfolio.summary()
-        await update.message.reply_text(
-            f"✅ <b>Paper portfolio reset</b>\n"
-            f"Before: equity ${before['equity']:.2f}, {before['open_positions']} positions\n"
-            f"After:  equity ${after['equity']:.2f}, cash ${after['cash']:.2f}",
-            parse_mode="HTML",
-        )
 
     def _is_authorized(self, update: Update) -> bool:
         """Only respond to the configured chat_id."""
