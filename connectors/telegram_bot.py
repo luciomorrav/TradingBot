@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Optional
 
 from telegram import Update
+from telegram.error import RetryAfter
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,9 @@ class TelegramBot:
         self._app: Optional[Application] = None
         self._running = False
         self._reset_pending_at: Optional[float] = None  # timestamp of pending reset
+        self._flood_blocked_until: float = 0.0  # Telegram RetryAfter blackout
+        self._last_notify_at: float = 0.0       # for notification throttle
+        self._notify_min_interval: float = 10.0 # seconds between trade notifications
 
     def set_engine(self, engine):
         self.engine = engine
@@ -58,14 +63,34 @@ class TelegramBot:
             self._running = False
             logger.info("Telegram bot stopped")
 
-    async def send_message(self, text: str):
-        """Send a message to the configured chat. Used as notify callback."""
+    async def send_message(self, text: str, force: bool = False):
+        """Send a message to the configured chat. Used as notify callback.
+
+        Handles Telegram flood control (RetryAfter) by honouring the blackout
+        window. Trade notifications are also throttled to avoid future floods;
+        pass force=True to bypass the throttle (used for kill-switch alerts).
+        """
         if not self._app or not self.chat_id:
             return
+
+        now = time.time()
+
+        # Honor active RetryAfter blackout
+        if now < self._flood_blocked_until:
+            remaining = self._flood_blocked_until - now
+            logger.debug("Telegram blocked for %.0fs, dropping message", remaining)
+            return
+
+        # Throttle high-frequency trade notifications
+        if not force and now - self._last_notify_at < self._notify_min_interval:
+            return
+
         try:
-            await self._app.bot.send_message(
-                chat_id=self.chat_id, text=text,
-            )
+            await self._app.bot.send_message(chat_id=self.chat_id, text=text)
+            self._last_notify_at = now
+        except RetryAfter as e:
+            self._flood_blocked_until = now + e.retry_after
+            logger.warning("Telegram flood control: blocked for %ds", e.retry_after)
         except Exception:
             logger.exception("Failed to send Telegram message")
 
