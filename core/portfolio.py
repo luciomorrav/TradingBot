@@ -131,7 +131,8 @@ class Portfolio:
 
             cost_basis_removed = close_shares * pos.avg_price
             pos.size -= cost_basis_removed
-            if pos.size <= 0.01:  # dust threshold
+            if pos.size <= 1.0:  # dust threshold — prevent residual buildup
+                self.cash += pos.size  # return remaining cost basis to cash
                 del self.positions[key]
 
             self.closed_trades.append(trade)

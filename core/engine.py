@@ -167,7 +167,7 @@ class Engine:
             # Total exposure cap — check with the cash-capped size
             max_exposure = self.portfolio.initial_capital * self.risk_manager.config.max_total_exposure_pct / 100
             if self.portfolio.total_exposure + size_usd > max_exposure:
-                logger.debug(
+                logger.info(
                     "Paper BUY skipped: exposure cap ($%.0f + $%.0f > $%.0f)",
                     self.portfolio.total_exposure, size_usd, max_exposure,
                 )
