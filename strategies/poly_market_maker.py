@@ -95,6 +95,7 @@ class PolyMarketMaker(BaseStrategy):
         self.market_states: dict[str, MarketState] = {}  # token_id -> state
         self._active_orders: dict[str, LiveOrder] = {}    # order_id -> LiveOrder
         self._db = None  # set by main.py for inventory persistence
+        self._validation_task: asyncio.Task | None = None
 
     async def run_cycle(self) -> list[Signal]:
         """Override base class — MM manages its own risk inside evaluate().
@@ -142,9 +143,11 @@ class PolyMarketMaker(BaseStrategy):
         self.logger.info("Market maker active on %d tokens across %d markets", len(token_ids), len(selected))
 
         # Validate real spreads after orderbooks arrive (~60s)
-        asyncio.create_task(self._delayed_validation())
+        self._validation_task = asyncio.create_task(self._delayed_validation())
 
     async def on_stop(self):
+        if self._validation_task and not self._validation_task.done():
+            self._validation_task.cancel()
         # Cancel all live orders before stopping
         await self._cancel_all_live_orders()
         await self._save_inventory()
@@ -422,18 +425,9 @@ class PolyMarketMaker(BaseStrategy):
         """Register an order for lifecycle tracking.
 
         Called by the engine/router after placing an order.
+        In paper mode, on_fill() is called immediately after, which pops the
+        order and updates inventory.
         """
-        if order_id.startswith("paper_"):
-            # In paper mode, simulate immediate fill → update inventory
-            state = self.market_states.get(token_id)
-            if state:
-                shares = size_usd / max(price, 0.01)
-                if side == "buy":
-                    state.inventory += shares
-                else:
-                    state.inventory -= shares
-            return
-
         self._active_orders[order_id] = LiveOrder(
             order_id=order_id,
             token_id=token_id,

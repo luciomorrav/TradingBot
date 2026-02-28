@@ -248,6 +248,7 @@ class Portfolio:
                     "strategy": p.strategy,
                     "fees_paid": p.fees_paid,
                     "current_price": p.current_price,
+                    "entry_time": p.entry_time,
                 }
                 for key, p in self.positions.items()
             },
@@ -271,4 +272,5 @@ class Portfolio:
                 strategy=p["strategy"],
                 fees_paid=p.get("fees_paid", 0.0),
                 current_price=p.get("current_price", 0.0),
+                entry_time=p.get("entry_time", time.time()),
             )

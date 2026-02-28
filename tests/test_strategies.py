@@ -203,8 +203,8 @@ def test_avellaneda_stoikov_extreme_mid_returns_none():
 
 # --- Market maker inventory tracking ---
 
-def test_track_order_paper_updates_inventory():
-    """Paper orders should immediately update inventory."""
+def test_track_order_and_fill_updates_inventory():
+    """Paper mode: track_order + on_fill should update inventory correctly."""
     from strategies.poly_market_maker import MarketState, PolyMarketMaker
     from core.portfolio import Portfolio
     from core.risk_manager import RiskConfig, RiskManager
@@ -217,11 +217,16 @@ def test_track_order_paper_updates_inventory():
     mm = PolyMarketMaker("test", portfolio, rm, {"market_maker": {}}, client)
     mm.market_states["t1"] = MarketState(token_id="t1", market_id="m1", outcome="YES")
 
-    mm.track_order("paper_123", "t1", "buy", price=0.50, size=100, size_usd=50)
-    assert mm.market_states["t1"].inventory == 100.0  # 50 / 0.50
+    # Paper mode flow: track_order registers, on_fill pops and updates inventory
+    mm.track_order("order_1", "t1", "buy", price=0.50, size=100, size_usd=50)
+    assert "order_1" in mm._active_orders
+    mm.on_fill("order_1", filled_size=100.0, filled_price=0.50)
+    assert mm.market_states["t1"].inventory == 100.0
+    assert "order_1" not in mm._active_orders
 
-    mm.track_order("paper_124", "t1", "sell", price=0.50, size=60, size_usd=30)
-    assert mm.market_states["t1"].inventory == 40.0  # 100 - 60
+    mm.track_order("order_2", "t1", "sell", price=0.50, size=60, size_usd=30)
+    mm.on_fill("order_2", filled_size=60.0, filled_price=0.50)
+    assert mm.market_states["t1"].inventory == 40.0
 
 
 def test_track_order_live_creates_active_order():
@@ -400,6 +405,7 @@ async def test_portfolio_to_dict_and_restore():
     pos = list(p2.positions.values())[0]
     assert pos.avg_price == 0.50
     assert pos.size == 21.0
+    assert pos.entry_time == pytest.approx(trade.timestamp, abs=1.0)  # entry_time preserved
 
 
 # --- Engine handle_fill ---

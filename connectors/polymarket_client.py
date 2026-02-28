@@ -117,8 +117,13 @@ class PolymarketClient:
         self._on_book_update: Optional[Callable] = None
         self._on_trade: Optional[Callable] = None
         self._on_user_trade: Optional[Callable] = None
+        self._notify_callback: Optional[Callable] = None  # async notify(msg)
 
         self._running = False
+
+        # Rate limiter for live orders (Polymarket limit: 60/min)
+        self._order_timestamps: list[float] = []
+        self._order_rate_limit = 50  # stay under 60/min with margin
 
     # --- Lifecycle ---
 
@@ -186,6 +191,10 @@ class PolymarketClient:
     def on_user_trade(self, callback: Callable):
         """Set callback for user WS fill/order events (separate from market trades)."""
         self._on_user_trade = callback
+
+    def set_notify(self, callback: Callable):
+        """Set async notification callback for WS status changes."""
+        self._notify_callback = callback
 
     # --- Market discovery (REST, call sparingly: 60 req/min) ---
 
@@ -293,6 +302,13 @@ class PolymarketClient:
             if not self._running:
                 break
 
+            # Notify on disconnect
+            if self._notify_callback:
+                try:
+                    await self._notify_callback("⚠️ Market WS disconnected — reconnecting...")
+                except Exception:
+                    pass
+
             # Reset backoff if connection was stable for > 30s
             if time.time() - connected_at > 30:
                 attempt = 0
@@ -375,6 +391,13 @@ class PolymarketClient:
             if not self._running:
                 break
 
+            # Notify on disconnect
+            if self._notify_callback:
+                try:
+                    await self._notify_callback("⚠️ User WS disconnected — fills may be missed!")
+                except Exception:
+                    pass
+
             # Reset backoff if connection was stable for > 30s
             if time.time() - connected_at > 30:
                 attempt = 0
@@ -416,6 +439,13 @@ class PolymarketClient:
         logger.info("Order: %s %.1f shares @ %.4f (token: %.8s...)", side.upper(), size, price, token_id)
 
         if self._live_enabled and self._clob:
+            # Rate limit check — drop orders that would exceed the limit
+            now = time.time()
+            self._order_timestamps = [t for t in self._order_timestamps if now - t < 60]
+            if len(self._order_timestamps) >= self._order_rate_limit:
+                logger.warning("Rate limit: %d orders in last 60s, dropping order", len(self._order_timestamps))
+                return {}
+            self._order_timestamps.append(now)
             return await self._place_live_order(token_id, side, price, size, order_type)
 
         # Paper mode — simulate instant fill

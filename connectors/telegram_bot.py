@@ -109,7 +109,6 @@ class TelegramBot:
             f"Equity: ${s['equity']:.2f} (PnL: ${s['equity_pnl']:+.2f})\n"
             f"Cash: ${s['cash']:.2f}\n"
             f"Exposure: ${s['total_exposure']:.2f} ({s['exposure_pct']:.0f}%)\n"
-            f"PnL: ${s['net_pnl']:+.2f}\n"
             f"Drawdown: {s['drawdown_pct']:.1f}%\n"
             f"Positions: {s['open_positions']}\n"
             f"Fees: ${s['total_fees']:.2f} | LLM: ${s['llm_cost']:.2f}"
@@ -185,11 +184,12 @@ class TelegramBot:
         s = self.engine.portfolio.summary()
         text = (
             f"<b>PnL Summary</b>\n"
+            f"Equity PnL: ${s['equity_pnl']:+.2f}\n"
             f"Realized: ${s['realized_pnl']:+.2f}\n"
             f"Unrealized: ${s['unrealized_pnl']:+.2f}\n"
             f"Fees: -${s['total_fees']:.2f}\n"
             f"LLM cost: -${s['llm_cost']:.2f}\n"
-            f"<b>Net: ${s['net_pnl']:+.2f}</b>"
+            f"<b>Net: ${s['equity_pnl']:+.2f}</b>"
         )
         await update.message.reply_text(text, parse_mode="HTML")
 

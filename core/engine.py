@@ -5,6 +5,7 @@ import logging
 import signal
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 
 from core.portfolio import Platform, Portfolio, Side, Trade
@@ -146,7 +147,6 @@ class Engine:
 
     async def _paper_execute(self, sig: Signal):
         """Simulate execution in paper mode (instant fill at signal price)."""
-        import uuid
 
         # For Polymarket use token_id as position key so each token tracks separately
         position_market_id = sig.metadata.get("token_id", sig.market_id)
@@ -356,7 +356,7 @@ class Engine:
                 side=Side.BUY if sig.direction == "buy" else Side.SELL,
                 price=filled_price,
                 size=filled_usd,
-                fee=sig.metadata.get("fee", 0.0),
+                fee=sig.metadata.get("fee", 0.0) * (filled_usd / max(sig.size_usd, 0.01)),
                 slippage=abs(filled_price - sig.price),
                 strategy=sig.strategy,
                 timestamp=time.time(),

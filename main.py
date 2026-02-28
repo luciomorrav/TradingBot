@@ -10,7 +10,6 @@ import asyncio
 import logging
 import sys
 
-from connectors.ib_client import IBClient
 from connectors.polymarket_client import PolymarketClient
 from connectors.telegram_bot import TelegramBot
 from core.engine import Engine
@@ -18,7 +17,6 @@ from core.execution_router import ExecutionRouter
 from core.portfolio import Portfolio
 from core.risk_manager import RiskConfig, RiskManager
 from data.db import Database
-from strategies.ib_pairs import IBPairsTrader
 from strategies.poly_market_maker import PolyMarketMaker
 from utils.helpers import load_config
 from utils.logger import setup_logging
@@ -65,6 +63,7 @@ async def main():
 
     # --- Polymarket connector ---
     poly_client = PolymarketClient(config.get("polymarket", {}))
+    poly_client.set_notify(tg.send_message)  # WS disconnect/reconnect alerts
     await poly_client.connect()
 
     # --- Strategies ---
@@ -78,30 +77,37 @@ async def main():
     mm._db = db
     engine.add_strategy(mm, interval_seconds=5.0)
 
-    # --- IB connector + pairs trading (paper only in Phase 1) ---
-    ib_client = IBClient(config.get("ib", {}))
-    await ib_client.connect()
+    # --- IB connector + pairs trading (only if IB config is present and enabled) ---
+    ib_client = None
+    ib_config = config.get("ib", {})
+    if ib_config.get("enabled", False):
+        from connectors.ib_client import IBClient
+        from strategies.ib_pairs import IBPairsTrader
 
-    pairs_trader = IBPairsTrader(
-        name="ib_pairs",
-        portfolio=portfolio,
-        risk_manager=risk_manager,
-        config=config.get("ib", {}),
-        ib_client=ib_client,
-    )
-    engine.add_strategy(pairs_trader, interval_seconds=30.0)
+        ib_client = IBClient(ib_config)
+        await ib_client.connect()
+
+        pairs_trader = IBPairsTrader(
+            name="ib_pairs",
+            portfolio=portfolio,
+            risk_manager=risk_manager,
+            config=ib_config,
+            ib_client=ib_client,
+        )
+        engine.add_strategy(pairs_trader, interval_seconds=30.0)
 
     # --- Execution router (live mode only) ---
     if mode == "live":
         router = ExecutionRouter()
         router.register("polymarket", poly_client)
-        router.register("ib", ib_client)
+        if ib_client:
+            router.register("ib", ib_client)
         engine.set_executor(router.execute)
 
         # Wire user WS for fill reconciliation (dedicated callback, not shared with market WS)
         poly_client.on_user_trade(engine.handle_fill)
         await poly_client.subscribe_user()
-        logger.info("Live execution router active (Polymarket + IB) with user WS")
+        logger.info("Live execution router active with user WS")
 
     logger.info("Starting bot in %s mode with $%.0f capital", mode, capital)
 
@@ -110,7 +116,8 @@ async def main():
     finally:
         # Graceful shutdown of all components
         logger.info("Shutting down components...")
-        await ib_client.disconnect()
+        if ib_client:
+            await ib_client.disconnect()
         await poly_client.disconnect()
         await tg.stop()
         await db.disconnect()
