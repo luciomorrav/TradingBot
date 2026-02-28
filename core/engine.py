@@ -420,7 +420,8 @@ class Engine:
                     summary = self.portfolio.summary()
                     await self.notify_callback(
                         f"💓 Heartbeat | Equity: ${summary['equity']:.0f} "
-                        f"| PnL: ${summary['net_pnl']:+.2f} "
+                        f"(PnL: ${summary['equity_pnl']:+.2f}) "
+                        f"| Exposure: {summary['exposure_pct']:.0f}% "
                         f"| Positions: {summary['open_positions']}"
                     )
             except asyncio.CancelledError:
