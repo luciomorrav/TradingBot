@@ -229,6 +229,39 @@ def test_track_order_and_fill_updates_inventory():
     assert mm.market_states["t1"].inventory == 40.0
 
 
+def test_on_fill_partial_keeps_order():
+    """Partial fills should update inventory but keep order until fully filled."""
+    from strategies.poly_market_maker import MarketState, PolyMarketMaker
+    from core.portfolio import Portfolio
+    from core.risk_manager import RiskConfig, RiskManager
+    from unittest.mock import MagicMock
+
+    portfolio = Portfolio(capital_usd=500)
+    rm = RiskManager(portfolio, RiskConfig())
+    client = MagicMock()
+
+    mm = PolyMarketMaker("test", portfolio, rm, {"market_maker": {}}, client)
+    mm.market_states["t1"] = MarketState(token_id="t1", market_id="m1", outcome="YES")
+
+    # Track order: 100 shares
+    mm.track_order("ord_1", "t1", "buy", price=0.50, size=100, size_usd=50)
+
+    # First partial fill: 40 of 100 shares
+    mm.on_fill("ord_1", filled_size=40.0, filled_price=0.50)
+    assert mm.market_states["t1"].inventory == 40.0
+    assert "ord_1" in mm._active_orders  # still tracked
+
+    # Second partial fill: 30 more shares (70 total < 99%)
+    mm.on_fill("ord_1", filled_size=30.0, filled_price=0.50)
+    assert mm.market_states["t1"].inventory == 70.0
+    assert "ord_1" in mm._active_orders  # still tracked
+
+    # Final fill: 30 more shares (100 total >= 99%)
+    mm.on_fill("ord_1", filled_size=30.0, filled_price=0.50)
+    assert mm.market_states["t1"].inventory == 100.0
+    assert "ord_1" not in mm._active_orders  # now removed
+
+
 def test_track_order_live_creates_active_order():
     """Live orders should be tracked in _active_orders, not update inventory."""
     from strategies.poly_market_maker import MarketState, PolyMarketMaker

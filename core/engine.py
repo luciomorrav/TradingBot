@@ -40,6 +40,7 @@ class Engine:
         self._tasks: list[asyncio.Task] = []
         self._pending_orders: dict[str, dict] = {}  # order_id → {sig, token_id, side, ...}
         self._fill_lock = asyncio.Lock()  # serialize fill processing
+        self._ws_connected_check = None  # callable → bool, blocks live orders if WS down
 
         # Paper mode fee rate — configurable via polymarket.paper_fee_rate
         poly_cfg = config.get("polymarket", {})
@@ -58,6 +59,10 @@ class Engine:
     def set_executor(self, callback):
         """Set trade execution callback: async def execute(signal: Signal) -> Trade | None"""
         self.execute_callback = callback
+
+    def set_ws_check(self, check):
+        """Set callable that returns True when user WS is connected (fail-closed for live)."""
+        self._ws_connected_check = check
 
     def set_db(self, callback, db_instance=None):
         """Set DB logging callback and optional DB instance for state persistence."""
@@ -113,6 +118,12 @@ class Engine:
         if self.mode == "paper":
             await self._paper_execute(sig)
         elif self.execute_callback:
+            # Fail-closed: block ALL live orders if user WS is disconnected
+            if self._ws_connected_check and not self._ws_connected_check():
+                logger.warning("User WS disconnected — blocking live order (%s %s $%.0f)",
+                               sig.direction, sig.symbol, sig.size_usd)
+                return
+
             # Full risk check before sending real orders (BUY adds exposure; SELL reduces it)
             if sig.direction == "buy":
                 ok, reason = await self.risk_manager.check_can_trade(sig.strategy, sig.size_usd)

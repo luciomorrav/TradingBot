@@ -120,6 +120,7 @@ class PolymarketClient:
         self._notify_callback: Optional[Callable] = None  # async notify(msg)
 
         self._running = False
+        self._user_ws_connected = False  # fail-closed: block live orders if WS down
 
         # Rate limiter for live orders (Polymarket limit: 60/min)
         self._order_timestamps: list[float] = []
@@ -170,6 +171,7 @@ class PolymarketClient:
 
     async def disconnect(self):
         self._running = False
+        self._user_ws_connected = False
         for ws in (self._ws_market, self._ws_user):
             if ws and not ws.closed:
                 await ws.close()
@@ -195,6 +197,11 @@ class PolymarketClient:
     def set_notify(self, callback: Callable):
         """Set async notification callback for WS status changes."""
         self._notify_callback = callback
+
+    @property
+    def user_ws_connected(self) -> bool:
+        """True when user WS is connected and receiving fills."""
+        return self._user_ws_connected
 
     # --- Market discovery (REST, call sparingly: 60 req/min) ---
 
@@ -375,6 +382,7 @@ class PolymarketClient:
                         },
                         "type": "user",
                     })
+                    self._user_ws_connected = True
                     logger.info("User WS connected")
 
                     async for raw in ws:
@@ -387,6 +395,8 @@ class PolymarketClient:
                 raise
             except Exception:
                 logger.exception("User WS error")
+
+            self._user_ws_connected = False
 
             if not self._running:
                 break

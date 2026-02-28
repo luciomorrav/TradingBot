@@ -106,6 +106,7 @@ async def main():
 
         # Wire user WS for fill reconciliation (dedicated callback, not shared with market WS)
         poly_client.on_user_trade(engine.handle_fill)
+        engine.set_ws_check(lambda: poly_client.user_ws_connected)
         await poly_client.subscribe_user()
         logger.info("Live execution router active with user WS")
 

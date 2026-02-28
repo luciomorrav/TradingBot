@@ -33,6 +33,7 @@ class LiveOrder:
     size_usd: float
     placed_at: float
     ttl: float = 60.0  # seconds before stale
+    filled_so_far: float = 0.0  # shares filled across partial fills
 
     @property
     def is_stale(self) -> bool:
@@ -188,7 +189,14 @@ class PolyMarketMaker(BaseStrategy):
         On each restart, the MM may select different markets. Positions from old
         markets accumulate in the portfolio and inflate exposure. This returns
         their cost basis to cash so capital can be redeployed to active markets.
+
+        SAFETY: Only runs in paper mode. In live mode, positions may still exist
+        on the exchange — removing them from the portfolio would cause desync.
         """
+        if self.client._live_enabled:
+            self.logger.info("Skipping stale position cleanup (live mode — positions may exist on exchange)")
+            return
+
         active_token_ids = set(self.market_states.keys())
         stale_keys = [
             key for key, pos in self.portfolio.positions.items()
@@ -398,10 +406,10 @@ class PolyMarketMaker(BaseStrategy):
     def on_fill(self, order_id: str, filled_size: float, filled_price: float):
         """Called when an order is filled. Updates inventory from actual fills.
 
-        This should be connected to the user WebSocket channel or
-        called by the engine after execution.
+        Supports partial fills: accumulates filled_so_far and only removes the
+        order from _active_orders when fully filled (>=99% of original size).
         """
-        order = self._active_orders.pop(order_id, None)
+        order = self._active_orders.get(order_id)
         if not order:
             return
 
@@ -415,9 +423,15 @@ class PolyMarketMaker(BaseStrategy):
         else:
             state.inventory -= filled_size
 
+        # Track cumulative fill — only remove when fully filled
+        order.filled_so_far += filled_size
+        if order.filled_so_far >= order.size * 0.99:
+            del self._active_orders[order_id]
+
         self.logger.info(
-            "Fill: %s %.1f %s @ %.4f → inventory: %.1f",
+            "Fill: %s %.1f %s @ %.4f → inventory: %.1f (filled: %.1f/%.1f)",
             order.side, filled_size, state.outcome, filled_price, state.inventory,
+            order.filled_so_far, order.size,
         )
 
     def track_order(self, order_id: str, token_id: str, side: str,
