@@ -12,7 +12,7 @@ polymarket:
   min_profit_threshold: 0.015  # 1.5% mínimo
   ws_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
   max_position_per_market: 70  # USD (~20% de $340 capital)
-  paper_fee_rate: 0.005  # 0.5% simulated fee in paper mode (real maker fee ~0%)
+  paper_fee_rate: 0.000  # Polymarket maker fee = 0% — paper mode matches live
   market_maker:
     target_spread: 0.02  # 2c min spread (was 5c — too tight for these markets)
     max_inventory: 120  # USD por mercado (~35% de capital)
