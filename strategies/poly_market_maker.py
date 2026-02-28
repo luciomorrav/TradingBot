@@ -97,6 +97,7 @@ class PolyMarketMaker(BaseStrategy):
         self._active_orders: dict[str, LiveOrder] = {}    # order_id -> LiveOrder
         self._db = None  # set by main.py for inventory persistence
         self._validation_task: asyncio.Task | None = None
+        self._live_mode = False  # set by main.py when mode == "live"
 
     async def run_cycle(self) -> list[Signal]:
         """Override base class — MM manages its own risk inside evaluate().
@@ -193,7 +194,7 @@ class PolyMarketMaker(BaseStrategy):
         SAFETY: Only runs in paper mode. In live mode, positions may still exist
         on the exchange — removing them from the portfolio would cause desync.
         """
-        if self.client._live_enabled:
+        if self._live_mode:
             self.logger.info("Skipping stale position cleanup (live mode — positions may exist on exchange)")
             return
 

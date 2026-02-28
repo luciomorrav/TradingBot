@@ -75,6 +75,7 @@ async def main():
         poly_client=poly_client,
     )
     mm._db = db
+    mm._live_mode = (mode == "live")
     engine.add_strategy(mm, interval_seconds=5.0)
 
     # --- IB connector + pairs trading (only if IB config is present and enabled) ---
