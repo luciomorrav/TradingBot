@@ -112,6 +112,13 @@ class Engine:
         if self.mode == "paper":
             await self._paper_execute(sig)
         elif self.execute_callback:
+            # Full risk check before sending real orders (BUY adds exposure; SELL reduces it)
+            if sig.direction == "buy":
+                ok, reason = await self.risk_manager.check_can_trade(sig.strategy, sig.size_usd)
+                if not ok:
+                    logger.debug("Live signal blocked by risk manager: %s", reason)
+                    return
+
             result = await self.execute_callback(sig)
             if not result:
                 return
@@ -155,6 +162,15 @@ class Engine:
             max_size = available / (1 + self._paper_fee_rate)
             size_usd = min(size_usd, max_size)
             if size_usd < 1.0:
+                return
+
+            # Total exposure cap — check with the cash-capped size
+            max_exposure = self.portfolio.initial_capital * self.risk_manager.config.max_total_exposure_pct / 100
+            if self.portfolio.total_exposure + size_usd > max_exposure:
+                logger.debug(
+                    "Paper BUY skipped: exposure cap ($%.0f + $%.0f > $%.0f)",
+                    self.portfolio.total_exposure, size_usd, max_exposure,
+                )
                 return
 
         orig_fee = sig.metadata.get("fee")
