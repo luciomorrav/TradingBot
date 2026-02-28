@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -263,8 +264,10 @@ class PolymarketClient:
             logger.info("Subscribed to %d additional tokens", len(new_tokens))
 
     async def _market_ws_loop(self):
-        """WebSocket loop with auto-reconnect."""
+        """WebSocket loop with exponential backoff reconnect."""
+        attempt = 0
         while self._running:
+            connected_at = time.time()
             try:
                 async with self._session.ws_connect(WS_MARKET, heartbeat=30) as ws:
                     self._ws_market = ws
@@ -281,14 +284,23 @@ class PolymarketClient:
                             await self._handle_market_msg(raw.data)
                         elif raw.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING):
                             break
+
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("Market WS error")
 
-            if self._running:
-                logger.info("Market WS reconnecting in 5s...")
-                await asyncio.sleep(5)
+            if not self._running:
+                break
+
+            # Reset backoff if connection was stable for > 30s
+            if time.time() - connected_at > 30:
+                attempt = 0
+
+            delay = min(2 ** attempt, 60) * random.uniform(0.8, 1.2)
+            logger.info("Market WS reconnecting in %.1fs (attempt %d)...", delay, attempt + 1)
+            await asyncio.sleep(delay)
+            attempt += 1
 
     async def _handle_market_msg(self, raw_data: str):
         try:
@@ -332,7 +344,10 @@ class PolymarketClient:
             self._user_ws_task = asyncio.create_task(self._user_ws_loop())
 
     async def _user_ws_loop(self):
+        """User WS loop with exponential backoff reconnect."""
+        attempt = 0
         while self._running:
+            connected_at = time.time()
             try:
                 async with self._session.ws_connect(WS_USER, heartbeat=30) as ws:
                     self._ws_user = ws
@@ -351,14 +366,23 @@ class PolymarketClient:
                             await self._handle_user_msg(raw.data)
                         elif raw.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
                             break
+
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("User WS error")
 
-            if self._running:
-                logger.info("User WS reconnecting in 5s...")
-                await asyncio.sleep(5)
+            if not self._running:
+                break
+
+            # Reset backoff if connection was stable for > 30s
+            if time.time() - connected_at > 30:
+                attempt = 0
+
+            delay = min(2 ** attempt, 60) * random.uniform(0.8, 1.2)
+            logger.info("User WS reconnecting in %.1fs (attempt %d)...", delay, attempt + 1)
+            await asyncio.sleep(delay)
+            attempt += 1
 
     async def _handle_user_msg(self, raw_data: str):
         try:
