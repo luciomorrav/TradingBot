@@ -14,13 +14,14 @@ polymarket:
   max_position_per_market: 70  # USD (~20% de $340 capital)
   paper_fee_rate: 0.000  # Polymarket maker fee = 0% — paper mode matches live
   market_maker:
-    target_spread: 0.02  # 2c min spread (was 5c — too tight for these markets)
+    target_spread: 0.02  # 2c min spread
     max_inventory: 120  # USD por mercado (~35% de capital)
     repost_threshold: 0.02  # repostear si mercado mueve > 2c
-    min_volume: 200       # broader range to find more opportunities
+    quote_cooldown: 60    # seconds between signals per token (was 30 — too fast)
+    min_volume: 500       # raised: better quality markets
     max_volume: 10000
-    max_markets: 8
-    min_liquidity: 50     # USD — skip markets with empty books (liq=$0)
+    max_markets: 4        # reduced for stable startup (was 8)
+    min_liquidity: 100    # raised: skip thin books (was 50)
     scoring:
       depth_target: 500      # USD — ideal book depth for low slippage
       volume_target: 2000    # USD — ideal daily volume for fast fills

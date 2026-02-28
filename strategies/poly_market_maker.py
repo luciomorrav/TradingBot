@@ -77,6 +77,7 @@ class PolyMarketMaker(BaseStrategy):
         self.target_spread = self.mm_config.get("target_spread", 0.02)
         self.max_inventory = self.mm_config.get("max_inventory", 200)
         self.repost_threshold = self.mm_config.get("repost_threshold", 0.02)
+        self.quote_cooldown = self.mm_config.get("quote_cooldown", 60)  # seconds between quotes per token
         self.max_position_per_market = config.get("max_position_per_market", 100)
         self.informed_flow_threshold = 500  # USD
         self.order_ttl = self.mm_config.get("order_ttl", 60.0)  # seconds
@@ -225,9 +226,38 @@ class PolyMarketMaker(BaseStrategy):
             state.mid_prices.append(book.mid_price)
             state.last_mid = book.mid_price
 
-            # Cooldown: one fill per ~30s simulates realistic order lifecycle
-            # (quotes stay up for TTL seconds, one side fills, then repost)
-            if now - state.last_quote_time < 30:
+            # Cooldown: configurable per-token quote interval (default 60s)
+            if now - state.last_quote_time < self.quote_cooldown:
+                continue
+
+            # Market resolution protection: if mid is near 0 or 1, close any inventory
+            # and skip new quotes — market is about to resolve (one token → $0).
+            if book.mid_price >= 0.92 or book.mid_price <= 0.08:
+                if state.inventory > 0:
+                    # Emergency sell: close entire inventory at best available ask
+                    size = state.inventory * book.mid_price
+                    if size >= 1.0:
+                        signals.append(Signal(
+                            strategy=self.name,
+                            market_id=state.market_id,
+                            symbol=f"{state.outcome}",
+                            direction="sell",
+                            size_usd=size,
+                            price=book.mid_price,
+                            confidence=1.0,
+                            metadata={
+                                "platform": "polymarket",
+                                "token_id": tid,
+                                "shares": state.inventory,
+                                "fee": 0.0,
+                                "close": True,
+                            },
+                        ))
+                        self.logger.warning(
+                            "Market resolving soon (mid=%.3f) — emergency close %s inventory %.1f shares",
+                            book.mid_price, state.outcome, state.inventory,
+                        )
+                        state.last_quote_time = now
                 continue
 
             # Skip if we already have live orders for this token
