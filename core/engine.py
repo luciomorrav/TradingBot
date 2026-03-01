@@ -159,6 +159,15 @@ class Engine:
     async def _paper_execute(self, sig: Signal):
         """Simulate execution in paper mode (instant fill at signal price)."""
 
+        # Drawdown guard — paper mode bypasses check_can_trade(), enforce here
+        dd_pct = self.risk_manager._current_drawdown_pct()
+        if dd_pct >= self.risk_manager.config.max_daily_drawdown_pct:
+            if not self.risk_manager.killed:
+                await self.risk_manager._trigger_kill_switch(
+                    f"Daily drawdown {dd_pct:.1f}% >= {self.risk_manager.config.max_daily_drawdown_pct}%"
+                )
+            return
+
         # For Polymarket use token_id as position key so each token tracks separately
         position_market_id = sig.metadata.get("token_id", sig.market_id)
 
@@ -218,6 +227,11 @@ class Engine:
             existing = self.portfolio.positions.get(pos_key)
             if existing and existing.side != trade.side:
                 should_close = True
+            elif trade.side == Side.SELL and not existing:
+                # Paper mode: never open short positions — portfolio may have
+                # dust-cleaned the position while MM inventory still shows shares.
+                logger.debug("Paper SELL skipped: no position for %s", trade.market_id[:20])
+                return
 
         if should_close:
             pnl = await self.portfolio.close_position(trade)

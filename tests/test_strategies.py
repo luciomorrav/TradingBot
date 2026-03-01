@@ -633,3 +633,58 @@ async def test_close_position_partial_pnl():
     assert len(p.positions) == 1
     pos = list(p.positions.values())[0]
     assert pos.size == pytest.approx(25.0, abs=0.5)
+
+
+@pytest.mark.asyncio
+async def test_paper_drawdown_triggers_kill_switch():
+    """Paper mode should trigger kill switch when drawdown exceeds limit."""
+    from core.portfolio import Portfolio
+    from core.risk_manager import RiskConfig, RiskManager
+    from core.engine import Engine
+
+    portfolio = Portfolio(capital_usd=100.0)
+    rc = RiskConfig(max_daily_drawdown_pct=5.0)
+    rm = RiskManager(portfolio, rc)
+
+    engine = Engine(portfolio, rm, {"general": {"mode": "paper"},
+                                    "polymarket": {"paper_fee_rate": 0.0}})
+
+    # Simulate loss: reduce cash to trigger 6% drawdown
+    portfolio.cash = 94.0  # equity = 94, drawdown = 6% > 5%
+
+    sig = Signal(
+        strategy="poly_mm", market_id="m1", symbol="Yes",
+        direction="buy", size_usd=10.0, price=0.50,
+        metadata={"token_id": "tok1", "platform": "polymarket", "fee": 0.0},
+    )
+    await engine._paper_execute(sig)
+
+    # Kill switch should have triggered — signal should be blocked
+    assert rm.killed is True
+    # No position should have been opened
+    assert len(portfolio.positions) == 0
+
+
+@pytest.mark.asyncio
+async def test_paper_sell_no_position_skipped():
+    """SELL signal in paper mode with no matching position should be skipped (no short)."""
+    from core.portfolio import Portfolio
+    from core.risk_manager import RiskConfig, RiskManager
+    from core.engine import Engine
+
+    portfolio = Portfolio(capital_usd=100.0)
+    rm = RiskManager(portfolio, RiskConfig())
+    engine = Engine(portfolio, rm, {"general": {"mode": "paper"},
+                                    "polymarket": {"paper_fee_rate": 0.0}})
+
+    sig = Signal(
+        strategy="poly_mm", market_id="m1", symbol="Yes",
+        direction="sell", size_usd=10.0, price=0.50,
+        metadata={"token_id": "tok1", "platform": "polymarket", "fee": 0.0},
+    )
+    await engine._paper_execute(sig)
+
+    # No position should be created (no short)
+    assert len(portfolio.positions) == 0
+    # Cash should be unchanged
+    assert portfolio.cash == 100.0

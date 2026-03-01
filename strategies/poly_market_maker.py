@@ -221,6 +221,17 @@ class PolyMarketMaker(BaseStrategy):
         signals: list[Signal] = []
         now = time.time()
 
+        # Resync inventory with portfolio — dust cleanup or reset may have
+        # removed positions without updating MM state.
+        for tid, state in self.market_states.items():
+            pos_key = f"polymarket:{tid}:{self.name}"
+            if pos_key not in self.portfolio.positions and state.inventory != 0:
+                self.logger.debug(
+                    "Inventory resync: %s %.1f → 0 (no portfolio position)",
+                    state.outcome, state.inventory,
+                )
+                state.inventory = 0
+
         # First: cancel stale orders and repost if market moved
         await self._manage_order_lifecycle()
 
