@@ -509,12 +509,16 @@ class PolyMarketMaker(BaseStrategy):
         return bid, ask
 
     def _detect_informed_flow(self, book: OrderBook) -> bool:
-        """Detect if large orders are entering (informed trader signal)."""
+        """Detect if top-of-book is abnormally large relative to total depth."""
         if not book.bids or not book.asks:
             return False
-        top_bid_size = book.bids[0].size * book.bids[0].price
-        top_ask_size = book.asks[0].size * book.asks[0].price
-        return top_bid_size > self.informed_flow_threshold or top_ask_size > self.informed_flow_threshold
+        top_bid_usd = book.bids[0].size * book.bids[0].price
+        top_ask_usd = book.asks[0].size * book.asks[0].price
+        total_depth = sum(l.size * l.price for l in book.bids[:5]) + sum(l.size * l.price for l in book.asks[:5])
+        if total_depth == 0:
+            return False
+        # Informed flow = single level is >60% of top-5 book depth
+        return (top_bid_usd / total_depth > 0.60) or (top_ask_usd / total_depth > 0.60)
 
     @staticmethod
     def _market_is_expired(end_date: str) -> bool:
