@@ -325,6 +325,9 @@ class Engine:
                 if order_id and order_id in self._pending_orders:
                     del self._pending_orders[order_id]
                     logger.info("Pending order removed (%s): %s", status, order_id[:12])
+                elif order_id:
+                    logger.debug("Cancel event for unknown order: %s (keys: %s)",
+                                 order_id[:12], list(fill_data.keys()))
             return
 
         # Only process trade events

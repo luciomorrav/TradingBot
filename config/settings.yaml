@@ -12,26 +12,42 @@ polymarket:
   chain_id: 137  # Polygon mainnet
   min_profit_threshold: 0.015  # 1.5% mínimo
   ws_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
-  max_position_per_market: 20  # USD — Phase 2 ($6/order)
+  max_position_per_market: 12  # USD — Phase 3 tighter exposure
   paper_fee_rate: 0.000  # Polymarket maker fee = 0% — paper mode matches live
   market_maker:
-    target_spread: 0.02  # 2c min spread
-    max_inventory: 20  # USD — Phase 2
+    target_spread: 0.02  # 2c min spread (A-S floor)
+    max_inventory: 12    # USD — cap directional exposure per token
     repost_threshold: 0.02  # repostear si mercado mueve > 2c
     order_ttl: 300        # seconds before order is stale (5 min — gives time for fills)
-    quote_cooldown: 60    # seconds between signals per token (was 30 — too fast)
+    quote_cooldown: 30    # seconds between signals per token (faster re-quote)
     min_volume: 500       # raised: better quality markets
     max_volume: 10000
-    max_markets: 3        # Phase 2 — more fill opportunities
+    max_markets: 5        # more markets = more fill opportunities
     min_liquidity: 100    # raised: skip thin books (was 50)
+    gamma: 5.0            # A-S risk aversion (was 10 → spread ~2.6c vs 4.4c)
+    kappa: 150.0          # A-S order intensity (was 100 → tighter spread)
+    min_hours_to_expiry: 72  # 3 days min — blocks sports/short-resolution markets
+    excluded_keywords:    # belt-and-suspenders sports filter
+      - "vs."
+      - " vs "
+      - "match"
+      - "winner of"
+      - "UFC"
+      - "NBA"
+      - "NFL"
+      - "MLB"
+      - "NHL"
+      - "ATP"
+      - "WTA"
+      - "IPL"
     scoring:
       depth_target: 500      # USD — ideal book depth for low slippage
       volume_target: 2000    # USD — ideal daily volume for fast fills
       weights:
-        balance: 0.40        # price balance (50/50 = wider spreads + two-way flow)
-        depth: 0.25          # book depth (more = less slippage)
+        balance: 0.30        # was 0.40 — still important but deprioritized
+        depth: 0.20          # was 0.25
         volume: 0.25         # daily volume (more = faster fills)
-        expiry: 0.10         # time to expiry (prefer >7 days)
+        expiry: 0.25         # was 0.10 — prioritize long-dated markets
 
 ib:
   host: 127.0.0.1

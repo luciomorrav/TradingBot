@@ -87,9 +87,9 @@ class PolyMarketMaker(BaseStrategy):
 
         # Avellaneda-Stoikov parameters — calibrated for prediction markets [0, 1]
         # gamma=0.1/kappa=1.5 produced 1.29 spread (entire price range!).
-        # gamma=10/kappa=100 → spread ≈ 0.04, inventory shift ≈ 1-2c at full load.
-        self.gamma = 10.0  # risk aversion (higher = wider spreads)
-        self.kappa = 100.0  # order arrival intensity (higher = tighter spreads)
+        # gamma=10/kappa=100 → spread ≈ 0.04, gamma=5/kappa=150 → spread ≈ 0.026.
+        self.gamma = self.mm_config.get("gamma", 10.0)  # risk aversion (higher = wider spreads)
+        self.kappa = self.mm_config.get("kappa", 100.0)  # order arrival intensity (higher = tighter spreads)
 
         self.market_states: dict[str, MarketState] = {}  # token_id -> state
         self._active_orders: dict[str, LiveOrder] = {}    # order_id -> LiveOrder
@@ -564,12 +564,24 @@ class PolyMarketMaker(BaseStrategy):
 
     def _select_markets(self, markets: list[Market]) -> list[Market]:
         """Select markets with highest MM suitability score."""
+        min_hours = self.mm_config.get("min_hours_to_expiry", 0)
+        excluded_keywords = self.mm_config.get("excluded_keywords", [])
         candidates = []
         for m in markets:
             if not m.active or not m.tokens:
                 continue
             if self._market_is_expired(m.end_date):
                 continue
+            # Minimum time-to-expiry: skip sports/short-resolution markets
+            if min_hours > 0:
+                hours_left = self._hours_to_expiry(m.end_date)
+                if 0 < hours_left < min_hours:
+                    continue
+            # Keyword exclusion: belt-and-suspenders sports filter
+            if excluded_keywords:
+                q_lower = m.question.lower()
+                if any(kw.lower() in q_lower for kw in excluded_keywords):
+                    continue
             if not (self.min_volume <= m.volume <= self.max_volume):
                 continue
             if m.liquidity < self.min_liquidity:
@@ -584,8 +596,9 @@ class PolyMarketMaker(BaseStrategy):
 
         result = [m for _, m in candidates[:self.max_markets]]
         for score, m in candidates[:self.max_markets]:
-            self.logger.info("  Selected: %s (score=%.3f, vol=$%.0f, liq=$%.0f)",
-                             m.question[:50], score, m.volume, m.liquidity)
+            hours_left = self._hours_to_expiry(m.end_date)
+            self.logger.info("  Selected: %s (score=%.3f, vol=$%.0f, liq=$%.0f, expiry=%.0fh)",
+                             m.question[:50], score, m.volume, m.liquidity, hours_left)
         return result
 
     async def _delayed_validation(self):
