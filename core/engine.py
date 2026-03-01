@@ -320,7 +320,8 @@ class Engine:
         if event_type == "order":
             status = fill_data.get("status", "")
             if status in ("CANCELED", "CANCELLED", "REJECTED", "EXPIRED"):
-                order_id = fill_data.get("order_id", "")
+                # Polymarket WS uses "id" for order events, not "order_id"
+                order_id = fill_data.get("id") or fill_data.get("order_id", "")
                 if order_id and order_id in self._pending_orders:
                     del self._pending_orders[order_id]
                     logger.info("Pending order removed (%s): %s", status, order_id[:12])
