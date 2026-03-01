@@ -141,7 +141,7 @@ class PolymarketClient:
 
                 # Polymarket proxy wallets use signature_type=1 (POLY_PROXY)
                 # EOA wallets use 0. Config default = 1 (web-created accounts).
-                sig_type = config.get("signature_type", 1)
+                sig_type = self.config.get("signature_type", 1)
 
                 if (self._api_secret and not self._api_secret.startswith("${")
                         and self._api_passphrase and not self._api_passphrase.startswith("${")):
