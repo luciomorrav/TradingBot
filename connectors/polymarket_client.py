@@ -139,6 +139,10 @@ class PolymarketClient:
                 from py_clob_client.client import ClobClient
                 from py_clob_client.clob_types import ApiCreds
 
+                # Polymarket proxy wallets use signature_type=1 (POLY_PROXY)
+                # EOA wallets use 0. Config default = 1 (web-created accounts).
+                sig_type = config.get("signature_type", 1)
+
                 if (self._api_secret and not self._api_secret.startswith("${")
                         and self._api_passphrase and not self._api_passphrase.startswith("${")):
                     # Full L2 auth — can post and cancel orders
@@ -150,14 +154,16 @@ class PolymarketClient:
                     self._clob = ClobClient(
                         CLOB_HOST, key=self._private_key,
                         chain_id=self._chain_id, creds=creds,
+                        signature_type=sig_type,
                     )
                     self._live_enabled = True
-                    logger.info("Polymarket CLOB client initialized (L2 auth — live orders enabled)")
+                    logger.info("Polymarket CLOB client initialized (L2 auth — live orders enabled, sig_type=%d)", sig_type)
                 else:
                     # L1 only — can derive creds but not trade yet
                     self._clob = ClobClient(
                         CLOB_HOST, key=self._private_key,
                         chain_id=self._chain_id,
+                        signature_type=sig_type,
                     )
                     logger.info("Polymarket CLOB client initialized (L1 auth only — derive creds with derive_api_creds())")
             except ImportError:
