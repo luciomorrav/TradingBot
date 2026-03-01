@@ -12,17 +12,17 @@ polymarket:
   chain_id: 137  # Polygon mainnet
   min_profit_threshold: 0.015  # 1.5% mínimo
   ws_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
-  max_position_per_market: 10  # USD — Phase 1 canary ($3/order)
+  max_position_per_market: 20  # USD — Phase 2 ($6/order)
   paper_fee_rate: 0.000  # Polymarket maker fee = 0% — paper mode matches live
   market_maker:
     target_spread: 0.02  # 2c min spread
-    max_inventory: 10  # USD — Phase 1 canary
+    max_inventory: 20  # USD — Phase 2
     repost_threshold: 0.02  # repostear si mercado mueve > 2c
     order_ttl: 300        # seconds before order is stale (5 min — gives time for fills)
     quote_cooldown: 60    # seconds between signals per token (was 30 — too fast)
     min_volume: 500       # raised: better quality markets
     max_volume: 10000
-    max_markets: 1        # Phase 1 canary — single market
+    max_markets: 3        # Phase 2 — more fill opportunities
     min_liquidity: 100    # raised: skip thin books (was 50)
     scoring:
       depth_target: 500      # USD — ideal book depth for low slippage
