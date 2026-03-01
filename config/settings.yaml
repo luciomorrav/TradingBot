@@ -69,7 +69,7 @@ llm:
   probability_model_diff_threshold: 0.05
 
 risk:
-  max_daily_drawdown_pct: 5.0
+  max_daily_drawdown_pct: 15.0
   max_position_pct: 20.0
   max_total_exposure_pct: 60.0
   consecutive_loss_cooldown: 3
