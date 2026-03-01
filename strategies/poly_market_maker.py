@@ -2,7 +2,6 @@
 
 Quotes both sides of prediction markets with:
 - Inventory-adjusted spreads (A-S model)
-- Informed flow detection (large orders → widen spread)
 - Market selection (niches with $500-5000/day volume)
 - Dynamic fee awareness per market
 - True quote management: inventory from fills, order lifecycle, cancel/repost
@@ -80,7 +79,6 @@ class PolyMarketMaker(BaseStrategy):
         self.repost_threshold = self.mm_config.get("repost_threshold", 0.02)
         self.quote_cooldown = self.mm_config.get("quote_cooldown", 60)  # seconds between quotes per token
         self.max_position_per_market = config.get("max_position_per_market", 100)
-        self.informed_flow_threshold = 500  # USD
         self.order_ttl = self.mm_config.get("order_ttl", 60.0)  # seconds
         self.min_volume = self.mm_config.get("min_volume", 200)
         self.max_volume = self.mm_config.get("max_volume", 10000)
@@ -289,11 +287,6 @@ class PolyMarketMaker(BaseStrategy):
 
             # Skip if spread is too tight — A-S model handles fee adjustment internally
             if book.spread < self.target_spread:
-                continue
-
-            # Check for informed flow
-            if self._detect_informed_flow(book):
-                self.logger.debug("Informed flow detected on %s, skipping", tid)
                 continue
 
             # Calculate Avellaneda-Stoikov optimal quotes
@@ -507,18 +500,6 @@ class PolyMarketMaker(BaseStrategy):
             return None, None
 
         return bid, ask
-
-    def _detect_informed_flow(self, book: OrderBook) -> bool:
-        """Detect if top-of-book is abnormally large relative to total depth."""
-        if not book.bids or not book.asks:
-            return False
-        top_bid_usd = book.bids[0].size * book.bids[0].price
-        top_ask_usd = book.asks[0].size * book.asks[0].price
-        total_depth = sum(l.size * l.price for l in book.bids[:5]) + sum(l.size * l.price for l in book.asks[:5])
-        if total_depth == 0:
-            return False
-        # Informed flow = single level is >60% of top-5 book depth
-        return (top_bid_usd / total_depth > 0.60) or (top_ask_usd / total_depth > 0.60)
 
     @staticmethod
     def _market_is_expired(end_date: str) -> bool:
