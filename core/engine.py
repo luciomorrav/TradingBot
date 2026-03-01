@@ -319,7 +319,7 @@ class Engine:
         # Handle order cancellations/rejections — clean up pending immediately
         if event_type == "order":
             status = fill_data.get("status", "")
-            if status in ("CANCELLED", "REJECTED", "EXPIRED"):
+            if status in ("CANCELED", "CANCELLED", "REJECTED", "EXPIRED"):
                 order_id = fill_data.get("order_id", "")
                 if order_id and order_id in self._pending_orders:
                     del self._pending_orders[order_id]

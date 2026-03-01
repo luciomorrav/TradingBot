@@ -18,6 +18,7 @@ polymarket:
     target_spread: 0.02  # 2c min spread
     max_inventory: 10  # USD — Phase 1 canary
     repost_threshold: 0.02  # repostear si mercado mueve > 2c
+    order_ttl: 300        # seconds before order is stale (5 min — gives time for fills)
     quote_cooldown: 60    # seconds between signals per token (was 30 — too fast)
     min_volume: 500       # raised: better quality markets
     max_volume: 10000
