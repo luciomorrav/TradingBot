@@ -566,12 +566,17 @@ class PolyMarketMaker(BaseStrategy):
         """Select markets with highest MM suitability score."""
         min_hours = self.mm_config.get("min_hours_to_expiry", 0)
         excluded_keywords = self.mm_config.get("excluded_keywords", [])
+        excluded_categories = self.mm_config.get("excluded_categories", [])
         candidates = []
         for m in markets:
             if not m.active or not m.tokens:
                 continue
             if self._market_is_expired(m.end_date):
                 continue
+            # Category exclusion: if API provides category (e.g., "Sports")
+            if excluded_categories and m.category:
+                if m.category.lower() in [c.lower() for c in excluded_categories]:
+                    continue
             # Minimum time-to-expiry: skip sports/short-resolution markets
             if min_hours > 0:
                 hours_left = self._hours_to_expiry(m.end_date)
