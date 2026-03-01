@@ -8,6 +8,7 @@ polymarket:
   api_key: ${POLY_API_KEY}             # CLOB API key (derived from private key)
   api_secret: ${POLY_API_SECRET}       # CLOB API secret (derived from private key)
   api_passphrase: ${POLY_API_PASSPHRASE}  # CLOB API passphrase (derived from private key)
+  funder_address: "0xEEe5a29e61fe30fc779E91f3A334f0A097c74d0F"  # Proxy wallet (holds USDC)
   chain_id: 137  # Polygon mainnet
   min_profit_threshold: 0.015  # 1.5% mínimo
   ws_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
