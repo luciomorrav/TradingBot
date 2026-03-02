@@ -142,6 +142,16 @@ class PolyMarketMaker(BaseStrategy):
         await self.client.subscribe_market(token_ids)
         self.logger.info("Market maker active on %d tokens across %d markets", len(token_ids), len(selected))
 
+        # Subscribe to stale portfolio positions for price updates (post-restart)
+        active_set = set(token_ids)
+        portfolio_tokens = [
+            pos.market_id for pos in self.portfolio.positions.values()
+            if pos.strategy == self.name and pos.market_id not in active_set
+        ]
+        if portfolio_tokens:
+            await self.client.subscribe_market(portfolio_tokens)
+            self.logger.info("Subscribed to %d stale portfolio tokens for price updates", len(portfolio_tokens))
+
         # Validate real spreads after orderbooks arrive (~60s)
         self._validation_task = asyncio.create_task(self._delayed_validation())
 
@@ -330,7 +340,7 @@ class PolyMarketMaker(BaseStrategy):
                 # BUY — MM manages its own risk (max_inventory per token).
                 # Don't use suggest_position_size: its exposure cap (60%)
                 # returns 0 when total exposure is high, deadlocking the MM.
-                size = min(base_size, self.portfolio.cash)
+                size = min(base_size, self.portfolio.available_cash)
                 if size < 1:
                     continue
                 shares_bid = size / max(bid_price, 0.01)

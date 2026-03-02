@@ -110,9 +110,9 @@ class RiskManager:
         if self.portfolio.total_exposure + size_usd > max_exposure:
             return False, f"Total exposure would exceed ${max_exposure:.0f} ({self.config.max_total_exposure_pct}%)"
 
-        # Cash check
-        if size_usd > self.portfolio.cash:
-            return False, f"Insufficient cash: ${self.portfolio.cash:.2f} < ${size_usd:.2f}"
+        # Cash check (accounts for pending live BUY orders)
+        if size_usd > self.portfolio.available_cash:
+            return False, f"Insufficient cash: ${self.portfolio.available_cash:.2f} available < ${size_usd:.2f} (reserved: ${self.portfolio.reserved_cash:.2f})"
 
         # Execution degradation check
         exec_check = self._check_execution_quality(strategy)
@@ -124,7 +124,7 @@ class RiskManager:
     def suggest_position_size(self, strategy: str, base_size: float, volatility: float = 0.0) -> float:
         """Dynamic position sizing. Reduces size when volatility is high or execution is degrading."""
         max_pos = self.portfolio.initial_capital * self.config.max_position_pct / 100
-        size = min(base_size, max_pos, self.portfolio.cash)
+        size = min(base_size, max_pos, self.portfolio.available_cash)
 
         # Reduce based on volatility (higher vol = smaller position)
         if volatility > 0:

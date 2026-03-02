@@ -237,3 +237,40 @@ async def test_portfolio_netting_partial_close(portfolio):
     assert len(portfolio.positions) == 1
     remaining = list(portfolio.positions.values())[0]
     assert remaining.size == pytest.approx(28.0, abs=0.1)  # 70 shares * $0.40
+
+
+# --- Reserved cash / available_cash ---
+
+def test_available_cash_default(portfolio):
+    """available_cash equals cash when no orders are pending."""
+    assert portfolio.available_cash == portfolio.cash
+    assert portfolio.reserved_cash == 0.0
+
+
+def test_available_cash_with_reserved(portfolio):
+    """available_cash subtracts reserved_cash."""
+    portfolio.reserved_cash = 36.0  # simulate 10 pending BUY orders × $3.60
+    assert portfolio.available_cash == pytest.approx(500 - 36, abs=0.01)
+
+
+def test_available_cash_floor_zero(portfolio):
+    """available_cash never goes negative."""
+    portfolio.reserved_cash = 9999.0
+    assert portfolio.available_cash == 0.0
+
+
+@pytest.mark.asyncio
+async def test_check_can_trade_respects_reserved_cash(rm, portfolio):
+    """Risk check should block trades when available_cash is insufficient."""
+    portfolio.reserved_cash = 460.0  # only $40 available
+    ok, reason = await rm.check_can_trade("test", 50)
+    assert not ok
+    assert "cash" in reason.lower() or "insufficient" in reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_check_can_trade_passes_with_enough_available(rm, portfolio):
+    """Risk check should pass when available_cash covers the trade."""
+    portfolio.reserved_cash = 100.0  # $400 available
+    ok, reason = await rm.check_can_trade("test", 50)
+    assert ok

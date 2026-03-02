@@ -77,6 +77,12 @@ class Portfolio:
         self.total_fees = 0.0
         self.total_llm_cost = 0.0
         self._lock = asyncio.Lock()
+        self.reserved_cash = 0.0  # Cash locked in pending live BUY orders (transient)
+
+    @property
+    def available_cash(self) -> float:
+        """Cash available for new orders (excluding pending live BUY orders)."""
+        return max(0, self.cash - self.reserved_cash)
 
     def _position_key(self, platform: Platform, market_id: str, strategy: str) -> str:
         return f"{platform.value}:{market_id}:{strategy}"

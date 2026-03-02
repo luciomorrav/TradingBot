@@ -141,6 +141,7 @@ class Engine:
 
             # Register pending order — portfolio update happens in handle_fill
             self._register_pending(sig, result)
+            self._update_reserved_cash()
 
             # Tell strategy to track this order (adds to _active_orders for lifecycle)
             runner = self.strategies.get(sig.strategy)
@@ -175,7 +176,7 @@ class Engine:
         # same cash snapshot at generation time, so later signals can overdraw.
         size_usd = sig.size_usd
         if sig.direction == "buy":
-            available = self.portfolio.cash
+            available = self.portfolio.available_cash
             if available < 1.0:
                 logger.debug("Skipping paper BUY: insufficient cash ($%.2f)", available)
                 return
@@ -287,6 +288,15 @@ class Engine:
 
     # --- Live mode: pending orders and fill reconciliation ---
 
+    def _update_reserved_cash(self):
+        """Recalculate cash reserved by pending BUY orders."""
+        reserved = 0.0
+        for p in self._pending_orders.values():
+            if p["side"] == "buy":
+                filled_usd = p.get("filled_so_far", 0.0) * p["price"]
+                reserved += max(0, p["size_usd"] - filled_usd)
+        self.portfolio.reserved_cash = reserved
+
     def _register_pending(self, sig: Signal, order_result: dict):
         """Track a live order as pending until fill arrives via user WS."""
         order_id = order_result.get("order_id", "")
@@ -324,6 +334,7 @@ class Engine:
                 order_id = fill_data.get("id") or fill_data.get("order_id", "")
                 if order_id and order_id in self._pending_orders:
                     del self._pending_orders[order_id]
+                    self._update_reserved_cash()
                     logger.info("Pending order removed (%s): %s", status, order_id[:12])
                 elif order_id:
                     logger.debug("Cancel event for unknown order: %s (keys: %s)",
@@ -376,6 +387,7 @@ class Engine:
             original_shares = pending["size_usd"] / max(pending["price"], 0.01)
             if pending["filled_so_far"] >= original_shares * 0.99:
                 del self._pending_orders[order_id]
+            self._update_reserved_cash()
 
             trade = Trade(
                 trade_id=f"{order_id}_{int(time.time())}",
@@ -469,6 +481,8 @@ class Engine:
                 for oid in stale:
                     del self._pending_orders[oid]
                     logger.warning("Pending order expired (no fill after 5min): %s", oid[:12])
+                if stale:
+                    self._update_reserved_cash()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -482,6 +496,7 @@ class Engine:
         if self._pending_orders:
             logger.info("Clearing %d pending orders on shutdown", len(self._pending_orders))
             self._pending_orders.clear()
+            self._update_reserved_cash()
 
         for _, runner in self.strategies.items():
             try:
