@@ -24,8 +24,9 @@ polymarket:
     max_volume: 10000
     max_markets: 5        # more markets = more fill opportunities
     min_liquidity: 100    # raised: skip thin books (was 50)
-    gamma: 5.0            # A-S risk aversion (was 10 → spread ~2.6c vs 4.4c)
+    gamma: 7.0            # A-S risk aversion (was 5 → spread ~3.3c, reduces adverse selection)
     kappa: 150.0          # A-S order intensity (was 100 → tighter spread)
+    min_order_shares: 5   # Polymarket minimum order size (shares)
     min_hours_to_expiry: 72  # 3 days min — blocks sports/short-resolution markets
     excluded_categories:  # category filter (if API provides it)
       - "Sports"

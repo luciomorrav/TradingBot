@@ -90,6 +90,7 @@ class PolyMarketMaker(BaseStrategy):
         # gamma=10/kappa=100 → spread ≈ 0.04, gamma=5/kappa=150 → spread ≈ 0.026.
         self.gamma = self.mm_config.get("gamma", 10.0)  # risk aversion (higher = wider spreads)
         self.kappa = self.mm_config.get("kappa", 100.0)  # order arrival intensity (higher = tighter spreads)
+        self.min_order_shares = self.mm_config.get("min_order_shares", 5)  # Polymarket minimum
 
         self.market_states: dict[str, MarketState] = {}  # token_id -> state
         self._active_orders: dict[str, LiveOrder] = {}    # order_id -> LiveOrder
@@ -202,11 +203,38 @@ class PolyMarketMaker(BaseStrategy):
         SAFETY: Only runs in paper mode. In live mode, positions may still exist
         on the exchange — removing them from the portfolio would cause desync.
         """
+        active_token_ids = set(self.market_states.keys())
+
+        # In ALL modes: clean up resolved markets (exchange has already settled them)
+        resolved_keys = []
+        for key, pos in self.portfolio.positions.items():
+            if pos.strategy != self.name:
+                continue
+            if pos.market_id in active_token_ids:
+                continue
+            if pos.current_price >= 0.97:
+                # Winning position — exchange already redeemed at $1/share
+                shares = pos.size / max(pos.avg_price, 0.01)
+                resolved_keys.append((key, shares * 1.0, "won"))
+            elif 0 < pos.current_price <= 0.03:
+                # Losing position — worthless
+                resolved_keys.append((key, 0.0, "lost"))
+
+        if resolved_keys:
+            async with self.portfolio._lock:
+                for key, proceeds, outcome in resolved_keys:
+                    pos = self.portfolio.positions.pop(key, None)
+                    if pos:
+                        self.portfolio.cash += proceeds
+                        self.logger.info(
+                            "Resolved position removed (%s): %s → +$%.2f",
+                            outcome, pos.symbol, proceeds,
+                        )
+
         if self._live_mode:
             self.logger.info("Skipping stale position cleanup (live mode — positions may exist on exchange)")
             return
 
-        active_token_ids = set(self.market_states.keys())
         stale_keys = [
             key for key, pos in self.portfolio.positions.items()
             if pos.strategy == self.name and pos.market_id not in active_token_ids
@@ -317,6 +345,8 @@ class PolyMarketMaker(BaseStrategy):
                 # SELL to reduce inventory — cap at what we hold (never go short)
                 max_shares = base_size / max(ask_price, 0.01)
                 shares_ask = min(max_shares, state.inventory)
+                if shares_ask < self.min_order_shares:
+                    continue  # below exchange minimum order size
                 size = shares_ask * ask_price
                 if size < 1:
                     continue
@@ -344,6 +374,8 @@ class PolyMarketMaker(BaseStrategy):
                 if size < 1:
                     continue
                 shares_bid = size / max(bid_price, 0.01)
+                if shares_bid < self.min_order_shares:
+                    continue  # below exchange minimum order size
                 signals.append(Signal(
                     strategy=self.name,
                     market_id=state.market_id,
