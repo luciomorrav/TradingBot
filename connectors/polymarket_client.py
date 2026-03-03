@@ -576,6 +576,49 @@ class PolymarketClient:
     def get_market(self, market_id: str) -> Optional[Market]:
         return self._markets.get(market_id)
 
+    # --- Exchange state queries (for reconciliation) ---
+
+    async def get_exchange_balance(self) -> float | None:
+        """Get USDC balance from exchange. Returns None on failure."""
+        if not self._live_enabled or not self._clob:
+            return None
+        try:
+            from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+            loop = asyncio.get_running_loop()
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            result = await loop.run_in_executor(
+                None, self._clob.get_balance_allowance, params
+            )
+            return float(result.get("balance", 0))
+        except Exception:
+            logger.exception("Failed to get exchange balance")
+            return None
+
+    async def get_exchange_orders(self) -> list | None:
+        """Get open orders from exchange. Returns None on failure."""
+        if not self._live_enabled or not self._clob:
+            return None
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, self._clob.get_orders)
+            if isinstance(result, dict):
+                return result.get("data", result.get("orders", []))
+            return result if isinstance(result, list) else []
+        except Exception:
+            logger.exception("Failed to get exchange orders")
+            return None
+
+    async def get_exchange_positions(self) -> list | None:
+        """Get positions from Polymarket data API (public endpoint)."""
+        address = self.config.get("funder_address")
+        if not address:
+            return None
+        data = await self._get(
+            "https://data-api.polymarket.com/positions",
+            {"user": address, "sizeThreshold": "0.1"},
+        )
+        return data if isinstance(data, list) else None
+
     # --- Internal ---
 
     def _parse_book(self, token_id: str, data: dict) -> OrderBook:

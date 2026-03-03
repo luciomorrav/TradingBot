@@ -688,3 +688,103 @@ async def test_paper_sell_no_position_skipped():
     assert len(portfolio.positions) == 0
     # Cash should be unchanged
     assert portfolio.cash == 100.0
+
+
+# --- Reconciliation tests ---
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_alerts_on_cash_desync():
+    """Reconciliation should alert when exchange balance differs from local by > $5."""
+    from core.portfolio import Portfolio
+    from core.risk_manager import RiskConfig, RiskManager
+    from core.engine import Engine
+    from unittest.mock import AsyncMock, MagicMock
+
+    portfolio = Portfolio(capital_usd=340.0)
+    rm = RiskManager(portfolio, RiskConfig())
+    engine = Engine(portfolio, rm, {"general": {"mode": "live"}})
+
+    # Mock poly_client with balance desync ($340 local vs $320 exchange = $20 delta)
+    mock_client = MagicMock()
+    mock_client.get_exchange_balance = AsyncMock(return_value=320.0)
+    mock_client.get_exchange_orders = AsyncMock(return_value=[])
+    mock_client.get_exchange_positions = AsyncMock(return_value=[])
+    engine.poly_client = mock_client
+
+    alerts = []
+    engine.notify_callback = AsyncMock(side_effect=lambda msg: alerts.append(msg))
+
+    await engine._run_reconciliation()
+
+    assert len(alerts) == 1
+    assert "Cash desync" in alerts[0]
+    assert "320.00" in alerts[0]
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_no_alert_when_matched():
+    """Reconciliation should not alert when states are within thresholds."""
+    from core.portfolio import Portfolio, Platform, Side, Trade
+    from core.risk_manager import RiskConfig, RiskManager
+    from core.engine import Engine
+    from unittest.mock import AsyncMock, MagicMock
+
+    portfolio = Portfolio(capital_usd=340.0)
+    # Add a position so local and exchange match
+    trade = Trade(
+        trade_id="t1", platform=Platform.POLYMARKET, market_id="tok_abc",
+        symbol="Yes", side=Side.BUY, price=0.50, size=10.0, fee=0.0,
+        strategy="poly_mm",
+    )
+    await portfolio.open_position(trade)
+    rm = RiskManager(portfolio, RiskConfig())
+    engine = Engine(portfolio, rm, {"general": {"mode": "live"}})
+
+    # Mock poly_client — everything matches within threshold
+    mock_client = MagicMock()
+    mock_client.get_exchange_balance = AsyncMock(return_value=331.0)  # $330 local, $331 exchange = $1 delta
+    mock_client.get_exchange_orders = AsyncMock(return_value=[])
+    mock_client.get_exchange_positions = AsyncMock(return_value=[
+        {"asset": "tok_abc", "size": "20.0"},  # 20 shares matches local (10/0.5=20)
+    ])
+    engine.poly_client = mock_client
+
+    alerts = []
+    engine.notify_callback = AsyncMock(side_effect=lambda msg: alerts.append(msg))
+
+    await engine._run_reconciliation()
+
+    # No alerts — everything within threshold
+    assert len(alerts) == 0
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_alerts_on_position_desync():
+    """Reconciliation should alert when exchange has positions not tracked locally."""
+    from core.portfolio import Portfolio
+    from core.risk_manager import RiskConfig, RiskManager
+    from core.engine import Engine
+    from unittest.mock import AsyncMock, MagicMock
+
+    portfolio = Portfolio(capital_usd=340.0)
+    rm = RiskManager(portfolio, RiskConfig())
+    engine = Engine(portfolio, rm, {"general": {"mode": "live"}})
+
+    # Exchange has 2 positions, bot has 0
+    mock_client = MagicMock()
+    mock_client.get_exchange_balance = AsyncMock(return_value=340.0)
+    mock_client.get_exchange_orders = AsyncMock(return_value=[])
+    mock_client.get_exchange_positions = AsyncMock(return_value=[
+        {"asset": "tok_orphan1", "size": "10.0"},
+        {"asset": "tok_orphan2", "size": "5.0"},
+    ])
+    engine.poly_client = mock_client
+
+    alerts = []
+    engine.notify_callback = AsyncMock(side_effect=lambda msg: alerts.append(msg))
+
+    await engine._run_reconciliation()
+
+    assert len(alerts) == 1
+    assert "exchange not in bot: 2" in alerts[0]

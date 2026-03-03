@@ -41,6 +41,7 @@ class Engine:
         self._pending_orders: dict[str, dict] = {}  # order_id → {sig, token_id, side, ...}
         self._fill_lock = asyncio.Lock()  # serialize fill processing
         self._ws_connected_check = None  # callable → bool, blocks live orders if WS down
+        self.poly_client = None  # set by main.py for reconciliation queries
 
         # Paper mode fee rate — configurable via polymarket.paper_fee_rate
         poly_cfg = config.get("polymarket", {})
@@ -93,6 +94,9 @@ class Engine:
 
         # Pending order cleanup task (live mode)
         self._tasks.append(asyncio.create_task(self._pending_order_cleanup_loop(), name="pending_cleanup"))
+
+        # Exchange reconciliation task (live mode)
+        self._tasks.append(asyncio.create_task(self._reconciliation_loop(), name="reconciliation"))
 
         try:
             await asyncio.gather(*self._tasks)
@@ -487,6 +491,89 @@ class Engine:
                 raise
             except Exception:
                 logger.exception("Error in pending order cleanup")
+
+    async def _reconciliation_loop(self):
+        """Reconcile bot state vs exchange every 10 minutes (live mode only)."""
+        await asyncio.sleep(120)  # let bot settle after startup
+        while self._running:
+            try:
+                await asyncio.sleep(600)  # 10 min
+                if self.mode != "live" or not self.poly_client:
+                    continue
+                await self._run_reconciliation()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Error in reconciliation loop")
+
+    async def _run_reconciliation(self):
+        """Compare local state vs exchange and alert on discrepancies."""
+        alerts = []
+
+        # 1. USDC balance check
+        exchange_bal = await self.poly_client.get_exchange_balance()
+        if exchange_bal is not None:
+            local_cash = self.portfolio.available_cash
+            delta = abs(exchange_bal - local_cash)
+            if delta > 5.0:
+                alerts.append(
+                    f"Cash desync: local=${local_cash:.2f} vs exchange=${exchange_bal:.2f} (delta ${delta:.2f})"
+                )
+            logger.info("Recon cash: local=$%.2f exchange=$%.2f delta=$%.2f",
+                        local_cash, exchange_bal, delta)
+
+        # 2. Open orders check
+        exchange_orders = await self.poly_client.get_exchange_orders()
+        if exchange_orders is not None:
+            local_count = len(self._pending_orders)
+            exchange_count = len(exchange_orders)
+            if abs(local_count - exchange_count) > 2:
+                alerts.append(
+                    f"Order desync: local={local_count} vs exchange={exchange_count}"
+                )
+            logger.info("Recon orders: local=%d exchange=%d", local_count, exchange_count)
+
+        # 3. Position check (data API)
+        exchange_positions = await self.poly_client.get_exchange_positions()
+        if exchange_positions is not None:
+            # Build exchange token set with non-zero size
+            exchange_tokens = {}
+            for ep in exchange_positions:
+                asset = ep.get("asset", ep.get("token_id", ""))
+                size = float(ep.get("size", 0))
+                if size > 0.1:
+                    exchange_tokens[asset] = size
+
+            # Local positions (polymarket only)
+            local_tokens = {}
+            for pos in self.portfolio.positions.values():
+                if pos.platform == Platform.POLYMARKET:
+                    shares = pos.size / max(pos.avg_price, 0.01)
+                    if shares > 0.1:
+                        local_tokens[pos.market_id] = shares
+
+            only_exchange = set(exchange_tokens) - set(local_tokens)
+            only_local = set(local_tokens) - set(exchange_tokens)
+            if only_exchange:
+                alerts.append(
+                    f"Positions on exchange not in bot: {len(only_exchange)}"
+                )
+            if only_local:
+                alerts.append(
+                    f"Positions in bot not on exchange: {len(only_local)}"
+                )
+            logger.info(
+                "Recon positions: local=%d exchange=%d only_exchange=%d only_local=%d",
+                len(local_tokens), len(exchange_tokens),
+                len(only_exchange), len(only_local),
+            )
+
+        # Send Telegram alert if any issues
+        if alerts and self.notify_callback:
+            msg = "⚠️ Reconciliation alert:\n" + "\n".join(f"- {a}" for a in alerts)
+            await self.notify_callback(msg)
+        elif not alerts:
+            logger.info("Reconciliation OK — no discrepancies")
 
     async def _shutdown(self):
         logger.info("Engine shutting down...")
