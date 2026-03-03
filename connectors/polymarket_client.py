@@ -589,7 +589,8 @@ class PolymarketClient:
             result = await loop.run_in_executor(
                 None, self._clob.get_balance_allowance, params
             )
-            return float(result.get("balance", 0))
+            # USDC has 6 decimals — balance returned in micro-units
+            return float(result.get("balance", 0)) / 1e6
         except Exception:
             logger.exception("Failed to get exchange balance")
             return None
