@@ -42,6 +42,7 @@ class Engine:
         self._fill_lock = asyncio.Lock()  # serialize fill processing
         self._ws_connected_check = None  # callable → bool, blocks live orders if WS down
         self.poly_client = None  # set by main.py for reconciliation queries
+        self._last_recon_alerts: list[str] = []  # suppress repeated identical alerts
 
         # Paper mode fee rate — configurable via polymarket.paper_fee_rate
         poly_cfg = config.get("polymarket", {})
@@ -568,12 +569,17 @@ class Engine:
                 len(only_exchange), len(only_local),
             )
 
-        # Send Telegram alert if any issues
-        if alerts and self.notify_callback:
+        # Send Telegram alert only if alerts CHANGED since last run (suppress repeats)
+        if alerts != self._last_recon_alerts and alerts and self.notify_callback:
             msg = "⚠️ Reconciliation alert:\n" + "\n".join(f"- {a}" for a in alerts)
             await self.notify_callback(msg)
+        elif not alerts and self._last_recon_alerts:
+            # Was alerting, now resolved
+            if self.notify_callback:
+                await self.notify_callback("✅ Reconciliation OK — discrepancies resolved")
         elif not alerts:
             logger.info("Reconciliation OK — no discrepancies")
+        self._last_recon_alerts = alerts
 
     async def _shutdown(self):
         logger.info("Engine shutting down...")
