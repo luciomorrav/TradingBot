@@ -515,7 +515,7 @@ class Engine:
         if exchange_bal is not None:
             local_cash = self.portfolio.available_cash
             delta = abs(exchange_bal - local_cash)
-            if delta > 5.0:
+            if delta > 30.0:
                 alerts.append(
                     f"Cash desync: local=${local_cash:.2f} vs exchange=${exchange_bal:.2f} (delta ${delta:.2f})"
                 )

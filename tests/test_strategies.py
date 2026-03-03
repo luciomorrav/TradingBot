@@ -695,7 +695,7 @@ async def test_paper_sell_no_position_skipped():
 
 @pytest.mark.asyncio
 async def test_reconciliation_alerts_on_cash_desync():
-    """Reconciliation should alert when exchange balance differs from local by > $5."""
+    """Reconciliation should alert when exchange balance differs from local by > $30."""
     from core.portfolio import Portfolio
     from core.risk_manager import RiskConfig, RiskManager
     from core.engine import Engine
@@ -705,9 +705,9 @@ async def test_reconciliation_alerts_on_cash_desync():
     rm = RiskManager(portfolio, RiskConfig())
     engine = Engine(portfolio, rm, {"general": {"mode": "live"}})
 
-    # Mock poly_client with balance desync ($340 local vs $320 exchange = $20 delta)
+    # Mock poly_client with balance desync ($340 local vs $300 exchange = $40 delta)
     mock_client = MagicMock()
-    mock_client.get_exchange_balance = AsyncMock(return_value=320.0)
+    mock_client.get_exchange_balance = AsyncMock(return_value=300.0)
     mock_client.get_exchange_orders = AsyncMock(return_value=[])
     mock_client.get_exchange_positions = AsyncMock(return_value=[])
     engine.poly_client = mock_client
@@ -719,7 +719,7 @@ async def test_reconciliation_alerts_on_cash_desync():
 
     assert len(alerts) == 1
     assert "Cash desync" in alerts[0]
-    assert "320.00" in alerts[0]
+    assert "300.00" in alerts[0]
 
 
 @pytest.mark.asyncio
