@@ -35,6 +35,16 @@ polymarket:
       - " vs "
       - "match"
       - "winner of"
+      - "qualify"
+      - "FIFA"
+      - "World Cup"
+      - "Serie A"
+      - "La Liga"
+      - "Premier League"
+      - "Bundesliga"
+      - "Ligue 1"
+      - "Champions League"
+      - "Europa League"
       - "UFC"
       - "NBA"
       - "NFL"
@@ -43,6 +53,9 @@ polymarket:
       - "ATP"
       - "WTA"
       - "IPL"
+      - "MLS"
+      - "F1"
+      - "Grand Prix"
     scoring:
       depth_target: 500      # USD — ideal book depth for low slippage
       volume_target: 2000    # USD — ideal daily volume for fast fills
