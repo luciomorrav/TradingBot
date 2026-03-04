@@ -71,6 +71,10 @@ class BaseStrategy(abc.ABC):
             signals = await self.evaluate()
             approved = []
             for sig in signals:
+                # SELL signals (exits) bypass risk checks — must always allow closure
+                if sig.direction == "sell":
+                    approved.append(sig)
+                    continue
                 size = self.risk_manager.suggest_position_size(self.name, sig.size_usd)
                 if size < 1.0:  # minimum $1
                     continue

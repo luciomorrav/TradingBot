@@ -51,6 +51,21 @@ polymarket:
         depth: 0.20          # was 0.25
         volume: 0.25         # daily volume (more = faster fills)
         expiry: 0.25         # was 0.10 — prioritize long-dated markets
+  news_edge:
+    enabled: true
+    shadow_mode: true            # log signals only, no real orders — validate 5-7 days first
+    edge_threshold: 0.12         # LLM must differ from market by >12%
+    min_confidence: 0.65         # LLM must be >65% confident
+    max_position_per_market: 10  # USD per directional bet
+    strategy_cap_pct: 10.0       # max 10% of equity for News Edge total
+    max_markets: 10              # markets to scan per cycle
+    cooldown_hours: 4            # don't re-analyze same market within 4h
+    take_profit_pct: 0.20        # close at +20%
+    stop_loss_pct: 0.15          # close at -15%
+    max_hold_hours: 48           # force close after 48h
+    market_refresh_seconds: 3600 # refresh shortlist every hour
+    min_volume: 1000             # higher volume = more newsworthy markets
+    min_hours_to_expiry: 48      # 2 days min
 
 ib:
   host: 127.0.0.1

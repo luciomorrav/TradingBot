@@ -788,3 +788,373 @@ async def test_reconciliation_alerts_on_position_desync():
 
     assert len(alerts) == 1
     assert "exchange not in bot: 2" in alerts[0]
+
+
+# --- LLM client tests ---
+
+
+@pytest.mark.asyncio
+async def test_llm_parse_valid_response():
+    """LLMClient should parse valid JSON response from the model."""
+    from connectors.llm_client import LLMClient
+    from unittest.mock import MagicMock
+
+    client = LLMClient({"model": "claude-haiku-4-5-20251001", "max_cost_per_day": 1.0})
+
+    # Mock anthropic response
+    mock_resp = MagicMock()
+    mock_resp.content = [MagicMock(text='{"probability": 0.72, "confidence": 0.85, "reasoning": "Strong evidence."}')]
+    mock_resp.usage.input_tokens = 500
+    mock_resp.usage.output_tokens = 50
+
+    mock_anthropic_client = MagicMock()
+    mock_anthropic_client.messages.create.return_value = mock_resp
+    client._client = mock_anthropic_client
+
+    result = await client.estimate_probability("Will X happen?", "Yes", 0.50, ["Headline 1"])
+
+    assert result is not None
+    assert result["probability"] == 0.72
+    assert result["confidence"] == 0.85
+    assert "Strong evidence" in result["reasoning"]
+    assert result["cost_usd"] > 0
+
+
+@pytest.mark.asyncio
+async def test_llm_budget_cap_reached():
+    """LLMClient should return None when daily cost exceeds budget."""
+    from connectors.llm_client import LLMClient
+
+    client = LLMClient({"max_cost_per_day": 0.001})
+    client._daily_cost = 0.002  # already over budget
+
+    result = await client.estimate_probability("Will X happen?", "Yes", 0.50, ["Headline 1"])
+
+    assert result is None
+
+
+# --- News Edge strategy tests ---
+
+
+def _make_news_edge(shadow=True):
+    """Helper: create a PolyNewsEdge with mocked dependencies."""
+    from strategies.poly_news_edge import PolyNewsEdge
+    from core.portfolio import Portfolio
+    from core.risk_manager import RiskConfig, RiskManager
+    from unittest.mock import MagicMock, AsyncMock
+
+    portfolio = Portfolio(capital_usd=340)
+    rm = RiskManager(portfolio, RiskConfig())
+    poly_client = MagicMock()
+    poly_client.fetch_active_markets = AsyncMock(return_value=[])
+    poly_client.subscribe_market = AsyncMock()
+    llm_client = MagicMock()
+    news_scraper = MagicMock()
+
+    config = {
+        "news_edge": {
+            "enabled": True,
+            "shadow_mode": shadow,
+            "edge_threshold": 0.12,
+            "min_confidence": 0.65,
+            "max_position_per_market": 10,
+            "strategy_cap_pct": 10.0,
+            "cooldown_hours": 4,
+            "take_profit_pct": 0.20,
+            "stop_loss_pct": 0.15,
+            "max_hold_hours": 48,
+        },
+        "market_maker": {},
+    }
+    ne = PolyNewsEdge("news_edge", portfolio, rm, config, poly_client, llm_client, news_scraper)
+    return ne, portfolio, llm_client, news_scraper
+
+
+@pytest.mark.asyncio
+async def test_news_edge_buy_yes_signal():
+    """LLM prob=0.80, market=0.50 → should generate BUY Yes signal (edge=+0.30)."""
+    from connectors.polymarket_client import Market
+    from unittest.mock import AsyncMock
+
+    ne, portfolio, llm, scraper = _make_news_edge(shadow=False)
+
+    # Mock news
+    scraper.fetch_news = AsyncMock(return_value=([{"title": "Breaking news"}], "hash123"))
+
+    # Mock LLM: prob=0.80, conf=0.90 → edge=+0.30 (Yes underpriced)
+    llm.estimate_probability = AsyncMock(return_value={
+        "probability": 0.80, "confidence": 0.90, "reasoning": "Strong signal", "cost_usd": 0.001,
+    })
+
+    market = Market(
+        id="m1", question="Will X happen?", slug="will-x", active=True,
+        end_date="2026-06-01T00:00:00Z",
+        tokens=[
+            {"token_id": "tok_yes", "outcome": "Yes", "price": 0.50},
+            {"token_id": "tok_no", "outcome": "No", "price": 0.50},
+        ],
+        volume=5000, liquidity=1000,
+    )
+    ne._markets = [market]
+    ne._last_refresh = time.time()  # skip refresh
+
+    signals = await ne.evaluate()
+
+    assert len(signals) == 1
+    sig = signals[0]
+    assert sig.direction == "buy"
+    assert sig.market_id == "tok_yes"  # BUY Yes (underpriced)
+    assert sig.metadata.get("edge") == 0.30
+    assert "shadow" not in sig.metadata  # not shadow mode
+
+
+@pytest.mark.asyncio
+async def test_news_edge_buy_no_signal():
+    """LLM prob=0.20, market=0.50 → should generate BUY No signal (edge=-0.30)."""
+    from connectors.polymarket_client import Market
+    from unittest.mock import AsyncMock
+
+    ne, portfolio, llm, scraper = _make_news_edge(shadow=False)
+
+    scraper.fetch_news = AsyncMock(return_value=([{"title": "Bad news"}], "hash456"))
+    llm.estimate_probability = AsyncMock(return_value={
+        "probability": 0.20, "confidence": 0.85, "reasoning": "Unlikely", "cost_usd": 0.001,
+    })
+
+    market = Market(
+        id="m2", question="Will Y happen?", slug="will-y", active=True,
+        end_date="2026-06-01T00:00:00Z",
+        tokens=[
+            {"token_id": "tok_yes2", "outcome": "Yes", "price": 0.50},
+            {"token_id": "tok_no2", "outcome": "No", "price": 0.50},
+        ],
+        volume=5000, liquidity=1000,
+    )
+    ne._markets = [market]
+    ne._last_refresh = time.time()
+
+    signals = await ne.evaluate()
+
+    assert len(signals) == 1
+    sig = signals[0]
+    assert sig.direction == "buy"
+    assert sig.market_id == "tok_no2"  # BUY No (Yes is overpriced)
+
+
+@pytest.mark.asyncio
+async def test_news_edge_cooldown_skip():
+    """Same market analyzed within cooldown should be skipped."""
+    from connectors.polymarket_client import Market
+    from unittest.mock import AsyncMock
+
+    ne, portfolio, llm, scraper = _make_news_edge()
+
+    # Mark market as recently analyzed
+    ne._analyzed["m3"] = (time.time(), "somehash")
+
+    market = Market(
+        id="m3", question="Will Z happen?", slug="will-z", active=True,
+        end_date="2026-06-01T00:00:00Z",
+        tokens=[
+            {"token_id": "tok_yes3", "outcome": "Yes", "price": 0.50},
+            {"token_id": "tok_no3", "outcome": "No", "price": 0.50},
+        ],
+        volume=5000, liquidity=1000,
+    )
+    ne._markets = [market]
+    ne._last_refresh = time.time()
+
+    signals = await ne.evaluate()
+
+    # Should be skipped — no LLM call, no signal
+    assert len(signals) == 0
+    llm.estimate_probability.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_news_edge_tp_exit():
+    """Position at +25% PnL should generate a SELL signal (take profit)."""
+    from core.portfolio import Platform, Side, Trade
+
+    ne, portfolio, llm, scraper = _make_news_edge()
+
+    # Open a position manually
+    trade = Trade(
+        trade_id="t1", platform=Platform.POLYMARKET, market_id="tok_tp",
+        symbol="Yes — Test", side=Side.BUY, price=0.40, size=10.0, fee=0.0,
+        strategy="news_edge", timestamp=time.time() - 3600,
+    )
+    await portfolio.open_position(trade)
+
+    # Simulate price increase → +25% PnL
+    pos = list(portfolio.positions.values())[0]
+    pos.current_price = 0.50  # (0.50 - 0.40) / 0.40 = +25%
+
+    ne._markets = []
+    ne._last_refresh = time.time()
+
+    signals = await ne.evaluate()
+
+    assert len(signals) == 1
+    sig = signals[0]
+    assert sig.direction == "sell"
+    assert sig.metadata.get("reason") == "TP"
+
+
+@pytest.mark.asyncio
+async def test_news_edge_shadow_no_execute():
+    """Shadow signal should have shadow=True in metadata, engine skips execution."""
+    from connectors.polymarket_client import Market
+    from core.engine import Engine
+    from core.risk_manager import RiskConfig, RiskManager
+    from unittest.mock import AsyncMock
+
+    ne, portfolio, llm, scraper = _make_news_edge(shadow=True)
+
+    scraper.fetch_news = AsyncMock(return_value=([{"title": "News"}], "hash789"))
+    llm.estimate_probability = AsyncMock(return_value={
+        "probability": 0.80, "confidence": 0.90, "reasoning": "Test", "cost_usd": 0.001,
+    })
+
+    market = Market(
+        id="m4", question="Shadow test?", slug="shadow", active=True,
+        end_date="2026-06-01T00:00:00Z",
+        tokens=[
+            {"token_id": "tok_shadow", "outcome": "Yes", "price": 0.50},
+            {"token_id": "tok_shadow_no", "outcome": "No", "price": 0.50},
+        ],
+        volume=5000, liquidity=1000,
+    )
+    ne._markets = [market]
+    ne._last_refresh = time.time()
+
+    signals = await ne.evaluate()
+    assert len(signals) == 1
+    assert signals[0].metadata.get("shadow") is True
+
+    # Engine should not execute shadow signals
+    rm = RiskManager(portfolio, RiskConfig())
+    engine = Engine(portfolio, rm, {"general": {"mode": "paper"}, "polymarket": {}})
+    notifications = []
+    engine.notify_callback = AsyncMock(side_effect=lambda msg: notifications.append(msg))
+
+    await engine._process_signal(signals[0])
+
+    # No position opened (shadow = no execution)
+    assert len(portfolio.positions) == 0
+    # But notification was sent
+    assert len(notifications) == 1
+    assert "Shadow" in notifications[0]
+
+
+# --- Regression tests (audit fixes) ---
+
+
+@pytest.mark.asyncio
+async def test_news_edge_tp_full_close():
+    """TP exit at higher price should close the FULL position (no dust left).
+
+    Regression: size_usd=pos.size at different price left partial position.
+    Fix: size_usd = shares * current_price so close_position() recovers exact share count.
+    """
+    from core.portfolio import Platform, Side, Trade
+
+    ne, portfolio, llm, scraper = _make_news_edge()
+
+    trade = Trade(
+        trade_id="t_full", platform=Platform.POLYMARKET, market_id="tok_full",
+        symbol="Yes — Full", side=Side.BUY, price=0.40, size=10.0, fee=0.0,
+        strategy="news_edge", timestamp=time.time() - 3600,
+    )
+    await portfolio.open_position(trade)
+
+    pos = list(portfolio.positions.values())[0]
+    pos.current_price = 0.50  # +25% → TP
+
+    ne._markets = []
+    ne._last_refresh = time.time()
+
+    signals = await ne.evaluate()
+    assert len(signals) == 1
+    sig = signals[0]
+
+    # size_usd should be shares * price, not pos.size
+    shares = 10.0 / 0.40  # 25 shares
+    expected_size = shares * 0.50  # $12.50
+    assert abs(sig.size_usd - expected_size) < 0.01
+
+    # Simulate close via portfolio
+    close_trade = Trade(
+        trade_id="t_close", platform=Platform.POLYMARKET, market_id="tok_full",
+        symbol="Yes — Full", side=Side.SELL, price=sig.price, size=sig.size_usd,
+        fee=0.0, strategy="news_edge",
+    )
+    await portfolio.close_position(close_trade)
+
+    # Position should be fully closed (no dust)
+    assert len(portfolio.positions) == 0
+
+
+@pytest.mark.asyncio
+async def test_sell_exit_bypasses_risk_manager():
+    """SELL signals should not be blocked by risk manager (cash/exposure checks).
+
+    Regression: run_cycle() applied check_can_trade() to SELL, blocking SL exits.
+    """
+    from core.portfolio import Platform, Side, Trade
+    from core.risk_manager import RiskConfig, RiskManager
+
+    ne, portfolio, llm, scraper = _make_news_edge()
+
+    # Drain all cash — risk manager would block any BUY
+    portfolio.cash = 0.0
+
+    trade = Trade(
+        trade_id="t_sl", platform=Platform.POLYMARKET, market_id="tok_sl",
+        symbol="Yes — SL", side=Side.BUY, price=0.50, size=10.0, fee=0.0,
+        strategy="news_edge", timestamp=time.time() - 3600,
+    )
+    await portfolio.open_position(trade)
+
+    pos = list(portfolio.positions.values())[0]
+    pos.current_price = 0.40  # -20% → SL
+
+    ne._markets = []
+    ne._last_refresh = time.time()
+
+    # run_cycle() applies risk checks — SELL must still pass
+    signals = await ne.run_cycle()
+
+    assert len(signals) == 1
+    assert signals[0].direction == "sell"
+    assert signals[0].metadata.get("reason") == "SL"
+
+
+@pytest.mark.asyncio
+async def test_news_edge_skip_exit_no_price():
+    """Position with current_price=0 (no WS update yet) should NOT trigger false SL.
+
+    Regression: current_price=0 after restart → PnL=-100% → instant SL.
+    """
+    from core.portfolio import Platform, Side, Trade
+
+    ne, portfolio, llm, scraper = _make_news_edge()
+
+    trade = Trade(
+        trade_id="t_no_price", platform=Platform.POLYMARKET, market_id="tok_np",
+        symbol="Yes — NP", side=Side.BUY, price=0.50, size=10.0, fee=0.0,
+        strategy="news_edge", timestamp=time.time() - 3600,
+    )
+    await portfolio.open_position(trade)
+
+    # current_price stays at 0.0 (no WS update yet)
+    pos = list(portfolio.positions.values())[0]
+    assert pos.current_price == 0.0
+
+    ne._markets = []
+    ne._last_refresh = time.time()
+
+    signals = await ne.evaluate()
+
+    # Should NOT generate any exit signal
+    assert len(signals) == 0

@@ -78,6 +78,33 @@ async def main():
     mm._live_mode = (mode == "live")
     engine.add_strategy(mm, interval_seconds=5.0)
 
+    # --- News Edge strategy (only if enabled + ANTHROPIC_API_KEY set) ---
+    ne_config = config.get("polymarket", {}).get("news_edge", {})
+    llm_config = config.get("llm", {})
+    llm_api_key = str(llm_config.get("api_key", ""))
+    if ne_config.get("enabled") and llm_api_key and not llm_api_key.startswith("${"):
+        from connectors.llm_client import LLMClient
+        from connectors.news_scraper import NewsScraper
+        from strategies.poly_news_edge import PolyNewsEdge
+
+        llm_client = LLMClient(llm_config)
+        news_scraper = NewsScraper(poly_client._session)
+        news_edge = PolyNewsEdge(
+            name="news_edge",
+            portfolio=portfolio,
+            risk_manager=risk_manager,
+            config=config.get("polymarket", {}),
+            poly_client=poly_client,
+            llm_client=llm_client,
+            news_scraper=news_scraper,
+        )
+        news_edge._live_mode = (mode == "live")
+        engine.add_strategy(news_edge, interval_seconds=600.0)  # 10 min
+        logger.info("News Edge strategy enabled (%s mode)",
+                     "shadow" if ne_config.get("shadow_mode", True) else "live")
+    else:
+        logger.info("News Edge strategy disabled (no API key or not enabled)")
+
     # --- IB connector + pairs trading (only if IB config is present and enabled) ---
     ib_client = None
     ib_config = config.get("ib", {})

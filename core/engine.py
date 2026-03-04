@@ -120,6 +120,20 @@ class Engine:
 
     async def _process_signal(self, sig: Signal):
         """Execute signal → log → notify → update strategy."""
+        # Shadow mode: log and notify, but don't execute (for strategy validation)
+        if sig.metadata.get("shadow"):
+            logger.info("Shadow signal: %s %s $%.0f @ %.4f (%s)",
+                        sig.direction, sig.symbol, sig.size_usd, sig.price, sig.strategy)
+            if self.notify_callback:
+                edge = sig.metadata.get("edge", 0)
+                conf = sig.confidence
+                await self.notify_callback(
+                    f"\U0001f47b Shadow: {sig.direction.upper()} {sig.symbol} "
+                    f"${sig.size_usd:.0f} @ {sig.price:.4f} "
+                    f"(edge {edge:+.0%}, conf {conf:.0%})"
+                )
+            return
+
         if self.mode == "paper":
             await self._paper_execute(sig)
         elif self.execute_callback:
