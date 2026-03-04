@@ -18,9 +18,16 @@ _OUTPUT_COST_PER_M = 4.00  # $4.00 / 1M output tokens
 
 _SYSTEM_PROMPT = (
     "You are a calibrated prediction market analyst. "
-    "Given a market question, its current price, and recent news headlines, "
-    "estimate the true probability of the outcome. "
-    "Respond ONLY with valid JSON: "
+    "Given a market question and recent news headlines, "
+    "estimate the true probability of the outcome.\n\n"
+    "Rules:\n"
+    "- Base your estimate on the NEWS PROVIDED, not on the current market price.\n"
+    "- If the headlines are irrelevant or insufficient, set confidence below 0.50.\n"
+    "- Meme, joke, or unfalsifiable markets (e.g. religious prophecy, celebrity stunts) "
+    "should get confidence 0.10 regardless of how obvious the answer seems.\n"
+    "- confidence reflects how much the NEWS informs your estimate "
+    "(0.1 = no useful info, 0.9 = strong evidence).\n\n"
+    "Respond ONLY with valid JSON:\n"
     '{"probability": <float 0-1>, "confidence": <float 0-1>, "reasoning": "<1-2 sentences>"}'
 )
 
@@ -66,8 +73,7 @@ class LLMClient:
         headlines_text = "\n".join(f"- {h}" for h in headlines[:10])
         user_msg = (
             f"Market question: {market_question}\n"
-            f"Outcome to estimate: {outcome_name}\n"
-            f"Current market price: {current_price:.4f}\n\n"
+            f"Outcome to estimate: {outcome_name}\n\n"
             f"Recent news:\n{headlines_text}\n\n"
             f"Estimate the true probability of \"{outcome_name}\"."
         )
