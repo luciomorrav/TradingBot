@@ -1087,8 +1087,12 @@ async def test_news_edge_cooldown_skip():
 
     ne, portfolio, llm, scraper = _make_news_edge()
 
-    # Mark market as recently analyzed
+    # Mark market as recently analyzed (with known hash)
     ne._analyzed["m3"] = (time.time(), "somehash")
+
+    # News fetch now happens before cooldown check — mock it
+    # Return NEW headlines but different hash to exercise cooldown path
+    scraper.fetch_news = AsyncMock(return_value=([{"title": "New headline"}], "newhash"))
 
     market = Market(
         id="m3", question="Will Z happen?", slug="will-z", active=True,
@@ -1104,7 +1108,7 @@ async def test_news_edge_cooldown_skip():
 
     signals = await ne.evaluate()
 
-    # Should be skipped — no LLM call, no signal
+    # Should be skipped by cooldown (new news but 4h not elapsed) — no LLM call
     assert len(signals) == 0
     llm.estimate_probability.assert_not_called()
 

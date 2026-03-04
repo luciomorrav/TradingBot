@@ -169,12 +169,6 @@ class PolyNewsEdge(BaseStrategy):
         """Analyze a single market: news → LLM → signal (or None)."""
         market_id = market.id
 
-        # Cooldown check
-        if market_id in self._analyzed:
-            last_ts, last_hash = self._analyzed[market_id]
-            if time.time() - last_ts < self.cooldown_hours * 3600:
-                return None
-
         # Skip if already have a position in this market
         for pos in self.portfolio.positions.values():
             if pos.strategy == self.name and pos.market_id in [
@@ -182,16 +176,19 @@ class PolyNewsEdge(BaseStrategy):
             ]:
                 return None
 
-        # Fetch news
+        # Fetch news (cheap HTTP call — do before cooldown so breaking news
+        # can bypass the 4h cooldown if headlines actually changed)
         headlines, news_hash = await self.news.fetch_news(market.question, max_results=5)
         if not headlines:
             return None
 
-        # Dedup: skip LLM if news hash unchanged
+        # Dedup + cooldown: skip LLM if news hash unchanged OR cooldown not elapsed
         if market_id in self._analyzed:
-            _, last_hash = self._analyzed[market_id]
+            last_ts, last_hash = self._analyzed[market_id]
             if news_hash == last_hash:
-                return None
+                return None  # same news — no point re-analyzing
+            if time.time() - last_ts < self.cooldown_hours * 3600:
+                return None  # different news but cooldown still active
 
         # Pick the "Yes" outcome for analysis (binary market)
         yes_token = None
@@ -219,8 +216,8 @@ class PolyNewsEdge(BaseStrategy):
         if not result:
             return None
 
-        # Track LLM cost in portfolio
-        self.portfolio.total_llm_cost += result.get("cost_usd", 0)
+        # Track LLM cost in portfolio (use locked method to avoid race)
+        await self.portfolio.add_llm_cost(result.get("cost_usd", 0))
 
         prob = result["probability"]
         conf = result["confidence"]
