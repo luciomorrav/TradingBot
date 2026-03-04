@@ -1158,3 +1158,76 @@ async def test_news_edge_skip_exit_no_price():
 
     # Should NOT generate any exit signal
     assert len(signals) == 0
+
+
+@pytest.mark.asyncio
+async def test_news_edge_no_token_uses_complement_price():
+    """BUY No signal should use 1 - yes_price, not the No token's stale price.
+
+    Regression: No token's API price was 0.0005 (thin book) while Yes=0.96,
+    producing a signal @ 0.0005 instead of @ 0.04.
+    """
+    from connectors.polymarket_client import Market
+    from unittest.mock import AsyncMock
+
+    ne, portfolio, llm, scraper = _make_news_edge(shadow=False)
+
+    scraper.fetch_news = AsyncMock(return_value=([{"title": "News"}], "hash_no"))
+    llm.estimate_probability = AsyncMock(return_value={
+        "probability": 0.05, "confidence": 0.80, "reasoning": "Very unlikely", "cost_usd": 0.001,
+    })
+
+    market = Market(
+        id="m_no", question="Will rare event happen?", slug="rare-event", active=True,
+        end_date="2026-06-01T00:00:00Z",
+        tokens=[
+            {"token_id": "tok_yes_r", "outcome": "Yes", "price": 0.80},
+            # No token has stale/wrong price from thin order book
+            {"token_id": "tok_no_r", "outcome": "No", "price": 0.0005},
+        ],
+        volume=5000, liquidity=1000,
+    )
+    ne._markets = [market]
+    ne._last_refresh = time.time()
+
+    signals = await ne.evaluate()
+
+    assert len(signals) == 1
+    sig = signals[0]
+    assert sig.market_id == "tok_no_r"  # BUY No
+    # Price should be complement (1 - 0.80 = 0.20), NOT 0.0005
+    assert abs(sig.price - 0.20) < 0.01
+
+
+@pytest.mark.asyncio
+async def test_news_edge_skip_low_price():
+    """Skip signal when buy_price is below minimum threshold (0.02).
+
+    E.g. Yes=0.99 → No complement = 0.01 → too low to be a real trade.
+    """
+    from connectors.polymarket_client import Market
+    from unittest.mock import AsyncMock
+
+    ne, portfolio, llm, scraper = _make_news_edge(shadow=False)
+
+    scraper.fetch_news = AsyncMock(return_value=([{"title": "News"}], "hash_low"))
+    llm.estimate_probability = AsyncMock(return_value={
+        "probability": 0.02, "confidence": 0.85, "reasoning": "Almost certain", "cost_usd": 0.001,
+    })
+
+    market = Market(
+        id="m_low", question="Will certain event happen?", slug="certain", active=True,
+        end_date="2026-06-01T00:00:00Z",
+        tokens=[
+            {"token_id": "tok_yes_c", "outcome": "Yes", "price": 0.99},
+            {"token_id": "tok_no_c", "outcome": "No", "price": 0.01},
+        ],
+        volume=5000, liquidity=1000,
+    )
+    ne._markets = [market]
+    ne._last_refresh = time.time()
+
+    signals = await ne.evaluate()
+
+    # Should skip — complement price 0.01 < 0.02 minimum
+    assert len(signals) == 0

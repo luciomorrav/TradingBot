@@ -250,7 +250,14 @@ class PolyNewsEdge(BaseStrategy):
             if not no_token:
                 return None
             token = no_token
-            buy_price = token.get("price", 1 - current_price)
+            # Use complement of Yes price — No token's own "price" field is often
+            # stale or from a thin order book and unreliable
+            buy_price = 1 - current_price
+
+        # Minimum price guard — skip if price is too low to be meaningful
+        if buy_price < 0.02:
+            self.logger.debug("Skip %s: buy_price %.4f too low", market.question[:40], buy_price)
+            return None
 
         # Size: min of per-market cap and remaining strategy cap
         size_usd = min(self.max_position_per_market, remaining_cap)
