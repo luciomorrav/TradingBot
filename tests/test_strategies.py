@@ -378,16 +378,15 @@ def test_select_markets_ordering():
 
 
 @pytest.mark.asyncio
-async def test_validate_markets_drops_tight_spread():
-    """Markets with spread < min should be dropped during post-WS validation."""
+async def test_validate_markets_soft_skips_tight_spread():
+    """Markets with tight spread get 30min cooldown (not permanently removed)."""
     from connectors.polymarket_client import OrderBook, OrderBookLevel
     from strategies.poly_market_maker import MarketState
-    from unittest.mock import MagicMock, AsyncMock
+    from unittest.mock import AsyncMock
 
     mm = _make_mm()
     mm.client.subscribe_market = AsyncMock()
 
-    # Set up two tokens: one with wide spread, one with tight spread
     mm.market_states["t_wide"] = MarketState(token_id="t_wide", market_id="m1", outcome="Wide")
     mm.market_states["t_tight"] = MarketState(token_id="t_tight", market_id="m2", outcome="Tight")
 
@@ -406,8 +405,147 @@ async def test_validate_markets_drops_tight_spread():
 
     await mm._validate_markets()
 
-    assert "t_wide" in mm.market_states, "Wide-spread market should remain"
-    assert "t_tight" not in mm.market_states, "Tight-spread market should be dropped"
+    # Both remain (soft-skip, not permanent drop)
+    assert "t_wide" in mm.market_states
+    assert "t_tight" in mm.market_states
+    # Tight-spread token gets future cooldown (last_quote_time set ~30 min in future)
+    assert mm.market_states["t_tight"].last_quote_time > time.time() + 1700
+
+
+@pytest.mark.asyncio
+async def test_two_sided_quoting_live_mode():
+    """Live mode should generate both BUY + SELL signals when inventory exists."""
+    from connectors.polymarket_client import OrderBook, OrderBookLevel
+    from strategies.poly_market_maker import MarketState, PolyMarketMaker
+    from core.portfolio import Portfolio, Position, Platform, Side
+    from core.risk_manager import RiskConfig, RiskManager
+    from unittest.mock import MagicMock
+
+    portfolio = Portfolio(capital_usd=500)
+    rm = RiskManager(portfolio, RiskConfig())
+    client = MagicMock()
+
+    mm = PolyMarketMaker("test", portfolio, rm, {"market_maker": {}}, client)
+    mm._live_mode = True
+
+    state = MarketState(token_id="t1", market_id="m1", outcome="YES", inventory=50)
+    for _ in range(10):
+        state.mid_prices.append(0.50)
+    mm.market_states["t1"] = state
+
+    # Must have a matching portfolio position so inventory resync doesn't clear it
+    portfolio.positions["polymarket:t1:test"] = Position(
+        platform=Platform.POLYMARKET, market_id="t1", symbol="YES",
+        side=Side.BUY, avg_price=0.50, size=25.0, strategy="test",
+    )
+
+    book = OrderBook("m1", "t1",
+                     bids=[OrderBookLevel(0.44, 100)],
+                     asks=[OrderBookLevel(0.56, 100)])
+    client.get_order_book = lambda tid: book
+
+    signals = await mm.evaluate()
+    directions = {s.direction for s in signals}
+    assert "buy" in directions, "Should have a BUY signal"
+    assert "sell" in directions, "Should have a SELL signal"
+
+
+@pytest.mark.asyncio
+async def test_one_sided_quoting_paper_mode():
+    """Paper mode should generate only ONE signal per token per cycle."""
+    from connectors.polymarket_client import OrderBook, OrderBookLevel
+    from strategies.poly_market_maker import MarketState, PolyMarketMaker
+    from core.portfolio import Portfolio
+    from core.risk_manager import RiskConfig, RiskManager
+    from unittest.mock import MagicMock
+
+    portfolio = Portfolio(capital_usd=500)
+    rm = RiskManager(portfolio, RiskConfig())
+    client = MagicMock()
+
+    mm = PolyMarketMaker("test", portfolio, rm, {"market_maker": {}}, client)
+    mm._live_mode = False
+
+    state = MarketState(token_id="t1", market_id="m1", outcome="YES", inventory=50)
+    for _ in range(10):
+        state.mid_prices.append(0.50)
+    mm.market_states["t1"] = state
+
+    book = OrderBook("m1", "t1",
+                     bids=[OrderBookLevel(0.44, 100)],
+                     asks=[OrderBookLevel(0.56, 100)])
+    client.get_order_book = lambda tid: book
+
+    signals = await mm.evaluate()
+    # Paper mode: only one side per token
+    assert len(signals) == 1
+
+
+def test_has_live_orders_side_aware():
+    """_has_live_orders with side param should only match that side."""
+    from strategies.poly_market_maker import PolyMarketMaker, LiveOrder
+    from core.portfolio import Portfolio
+    from core.risk_manager import RiskConfig, RiskManager
+    from unittest.mock import MagicMock
+
+    portfolio = Portfolio(capital_usd=500)
+    rm = RiskManager(portfolio, RiskConfig())
+    client = MagicMock()
+
+    mm = PolyMarketMaker("test", portfolio, rm, {"market_maker": {}}, client)
+
+    # Track a BUY order
+    mm._active_orders["ord1"] = LiveOrder(
+        order_id="ord1", token_id="t1", side="buy",
+        price=0.48, size=10, size_usd=5, placed_at=time.time(),
+    )
+
+    # No side filter → True (any order exists)
+    assert mm._has_live_orders("t1") is True
+    # Side "buy" → True
+    assert mm._has_live_orders("t1", "buy") is True
+    # Side "sell" → False (only buy exists)
+    assert mm._has_live_orders("t1", "sell") is False
+
+
+@pytest.mark.asyncio
+async def test_signal_cap_per_cycle():
+    """Max signals per cycle should be capped at MAX_SIGNALS_PER_CYCLE."""
+    from connectors.polymarket_client import OrderBook, OrderBookLevel
+    from strategies.poly_market_maker import MarketState, PolyMarketMaker
+    from core.portfolio import Portfolio, Position, Platform, Side
+    from core.risk_manager import RiskConfig, RiskManager
+    from unittest.mock import MagicMock
+
+    portfolio = Portfolio(capital_usd=5000)
+    rm = RiskManager(portfolio, RiskConfig())
+    client = MagicMock()
+
+    mm = PolyMarketMaker("test", portfolio, rm, {"market_maker": {}}, client)
+    mm._live_mode = True
+
+    # Add 10 tokens — all with inventory for two-sided quoting
+    for i in range(10):
+        tid = f"t{i}"
+        state = MarketState(
+            token_id=tid, market_id=f"m{i}", outcome="YES", inventory=50,
+        )
+        for _ in range(10):
+            state.mid_prices.append(0.50)
+        mm.market_states[tid] = state
+        # Must have matching portfolio position (inventory resync)
+        portfolio.positions[f"polymarket:{tid}:test"] = Position(
+            platform=Platform.POLYMARKET, market_id=tid, symbol="YES",
+            side=Side.BUY, avg_price=0.50, size=25.0, strategy="test",
+        )
+
+    book = OrderBook("m0", "t0",
+                     bids=[OrderBookLevel(0.44, 100)],
+                     asks=[OrderBookLevel(0.56, 100)])
+    client.get_order_book = lambda tid: book
+
+    signals = await mm.evaluate()
+    assert len(signals) <= 6, f"Expected max 6 signals, got {len(signals)}"
 
 
 # --- Portfolio persistence ---

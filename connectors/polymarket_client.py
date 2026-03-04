@@ -653,19 +653,21 @@ class PolymarketClient:
                 levels.sort(key=lambda x: x.price)
 
     async def _get(self, url: str, params: dict = None) -> Optional[dict | list]:
-        try:
-            async with self._session.get(url, params=params) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                if resp.status == 429:
-                    logger.warning("Rate limited on %s", url)
-                    await asyncio.sleep(5)
+        for attempt in range(2):
+            try:
+                async with self._session.get(url, params=params) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    if resp.status == 429:
+                        logger.warning("Rate limited on %s (attempt %d/2)", url, attempt + 1)
+                        await asyncio.sleep(5 + attempt * 5)
+                        continue
+                    logger.error("GET %s → %d", url, resp.status)
                     return None
-                logger.error("GET %s → %d", url, resp.status)
+            except asyncio.TimeoutError:
+                logger.error("Timeout: GET %s", url)
                 return None
-        except asyncio.TimeoutError:
-            logger.error("Timeout: GET %s", url)
-            return None
-        except Exception:
-            logger.exception("Error: GET %s", url)
-            return None
+            except Exception:
+                logger.exception("Error: GET %s", url)
+                return None
+        return None

@@ -319,10 +319,6 @@ class PolyMarketMaker(BaseStrategy):
                         state.last_quote_time = now
                 continue
 
-            # Skip if we already have live orders for this token
-            if self._has_live_orders(tid):
-                continue
-
             # Skip if spread is too tight — A-S model handles fee adjustment internally
             if book.spread < self.target_spread:
                 continue
@@ -335,63 +331,126 @@ class PolyMarketMaker(BaseStrategy):
             # Inventory in USD — max_inventory is a USD cap, not a shares cap.
             inventory_usd = state.inventory * book.mid_price
             base_size = min(self.max_position_per_market * 0.3, 50)
+            quoted_this_token = False
 
-            # Only ONE side fills per cycle.  In reality both quotes are posted
-            # as limit orders but only one gets hit before the MM reposts.
-            # Paper mode fills instantly, so we pick the side that keeps
-            # inventory neutral: significant long → SELL to reduce, else → BUY.
-            sell_threshold = base_size * 0.3  # ~$6 dead zone — ignore dust
-            if inventory_usd > sell_threshold and ask_price < 0.99:
-                # SELL to reduce inventory — cap at what we hold (never go short)
-                max_shares = base_size / max(ask_price, 0.01)
-                shares_ask = min(max_shares, state.inventory)
-                if shares_ask < self.min_order_shares:
-                    continue  # below exchange minimum order size
-                size = shares_ask * ask_price
-                if size < 1:
+            if self._live_mode:
+                # --- Two-sided quoting (live mode) ---
+                # Post both bid + ask as resting limit orders.
+                has_buy = self._has_live_orders(tid, "buy")
+                has_sell = self._has_live_orders(tid, "sell")
+                if has_buy and has_sell:
                     continue
-                signals.append(Signal(
-                    strategy=self.name,
-                    market_id=state.market_id,
-                    symbol=f"{state.outcome}",
-                    direction="sell",
-                    size_usd=size,
-                    price=ask_price,
-                    confidence=0.6,
-                    metadata={
-                        "platform": "polymarket",
-                        "token_id": tid,
-                        "shares": shares_ask,
-                        "fee": state.fee_rate * size,
-                    },
-                ))
-                state.last_quote_time = now
-            elif bid_price > 0.01 and inventory_usd < self.max_inventory:
-                # BUY — MM manages its own risk (max_inventory per token).
-                # Don't use suggest_position_size: its exposure cap (60%)
-                # returns 0 when total exposure is high, deadlocking the MM.
-                size = min(base_size, self.portfolio.available_cash)
-                if size < 1:
+
+                # BUY side
+                if not has_buy and bid_price > 0.01 and inventory_usd < self.max_inventory:
+                    size = min(base_size, self.portfolio.available_cash)
+                    if size >= 1:
+                        shares_bid = size / max(bid_price, 0.01)
+                        if shares_bid >= self.min_order_shares:
+                            signals.append(Signal(
+                                strategy=self.name,
+                                market_id=state.market_id,
+                                symbol=f"{state.outcome}",
+                                direction="buy",
+                                size_usd=size,
+                                price=bid_price,
+                                confidence=0.6,
+                                metadata={
+                                    "platform": "polymarket",
+                                    "token_id": tid,
+                                    "shares": shares_bid,
+                                    "fee": state.fee_rate * size,
+                                },
+                            ))
+                            quoted_this_token = True
+
+                # SELL side — only if we have inventory (never go short)
+                if not has_sell and ask_price < 0.99 and state.inventory > 0:
+                    max_shares = base_size / max(ask_price, 0.01)
+                    shares_ask = min(max_shares, state.inventory)
+                    if shares_ask >= self.min_order_shares:
+                        size = shares_ask * ask_price
+                        if size >= 1:
+                            signals.append(Signal(
+                                strategy=self.name,
+                                market_id=state.market_id,
+                                symbol=f"{state.outcome}",
+                                direction="sell",
+                                size_usd=size,
+                                price=ask_price,
+                                confidence=0.6,
+                                metadata={
+                                    "platform": "polymarket",
+                                    "token_id": tid,
+                                    "shares": shares_ask,
+                                    "fee": state.fee_rate * size,
+                                },
+                            ))
+                            quoted_this_token = True
+
+            else:
+                # --- One-sided quoting (paper mode) ---
+                # Paper mode fills instantly, so we pick ONE side to avoid wash trades.
+                # Significant inventory → SELL to reduce, else → BUY.
+                if self._has_live_orders(tid):
                     continue
-                shares_bid = size / max(bid_price, 0.01)
-                if shares_bid < self.min_order_shares:
-                    continue  # below exchange minimum order size
-                signals.append(Signal(
-                    strategy=self.name,
-                    market_id=state.market_id,
-                    symbol=f"{state.outcome}",
-                    direction="buy",
-                    size_usd=size,
-                    price=bid_price,
-                    confidence=0.6,
-                    metadata={
-                        "platform": "polymarket",
-                        "token_id": tid,
-                        "shares": shares_bid,
-                        "fee": state.fee_rate * size,
-                    },
-                ))
+
+                sell_threshold = base_size * 0.3  # ~$1 dead zone — ignore dust
+                if inventory_usd > sell_threshold and ask_price < 0.99:
+                    max_shares = base_size / max(ask_price, 0.01)
+                    shares_ask = min(max_shares, state.inventory)
+                    if shares_ask < self.min_order_shares:
+                        continue
+                    size = shares_ask * ask_price
+                    if size < 1:
+                        continue
+                    signals.append(Signal(
+                        strategy=self.name,
+                        market_id=state.market_id,
+                        symbol=f"{state.outcome}",
+                        direction="sell",
+                        size_usd=size,
+                        price=ask_price,
+                        confidence=0.6,
+                        metadata={
+                            "platform": "polymarket",
+                            "token_id": tid,
+                            "shares": shares_ask,
+                            "fee": state.fee_rate * size,
+                        },
+                    ))
+                    quoted_this_token = True
+                elif bid_price > 0.01 and inventory_usd < self.max_inventory:
+                    size = min(base_size, self.portfolio.available_cash)
+                    if size < 1:
+                        continue
+                    shares_bid = size / max(bid_price, 0.01)
+                    if shares_bid < self.min_order_shares:
+                        continue
+                    signals.append(Signal(
+                        strategy=self.name,
+                        market_id=state.market_id,
+                        symbol=f"{state.outcome}",
+                        direction="buy",
+                        size_usd=size,
+                        price=bid_price,
+                        confidence=0.6,
+                        metadata={
+                            "platform": "polymarket",
+                            "token_id": tid,
+                            "shares": shares_bid,
+                            "fee": state.fee_rate * size,
+                        },
+                    ))
+                    quoted_this_token = True
+
+            if quoted_this_token:
                 state.last_quote_time = now
+
+        # Rate limit guard: cap signals per cycle to stay under 50 orders/min
+        MAX_SIGNALS_PER_CYCLE = 6
+        if len(signals) > MAX_SIGNALS_PER_CYCLE:
+            signals = signals[:MAX_SIGNALS_PER_CYCLE]
 
         if signals:
             self.logger.info("Generated %d signals this cycle", len(signals))
@@ -423,10 +482,11 @@ class PolyMarketMaker(BaseStrategy):
         for oid in to_cancel:
             await self._cancel_order(oid)
 
-    def _has_live_orders(self, token_id: str) -> bool:
-        """Check if we already have non-stale orders for a token."""
+    def _has_live_orders(self, token_id: str, side: str = None) -> bool:
+        """Check if we already have non-stale orders for a token (optionally per-side)."""
         return any(
             o.token_id == token_id and not o.is_stale
+            and (side is None or o.side == side)
             for o in self._active_orders.values()
         )
 
@@ -654,40 +714,28 @@ class PolyMarketMaker(BaseStrategy):
         await self._validate_markets()
 
     async def _validate_markets(self):
-        """Post-WS validation: drop markets with tight real spreads, replace with backups."""
-        min_spread = max(self.target_spread, 0.02)
-        to_remove = []
+        """Post-WS validation: soft-skip tokens with tight spreads (30min cooldown).
 
-        for tid, state in list(self.market_states.items()):
+        Unlike the old behavior (permanent removal), this applies a temporary
+        cooldown so tokens can become quotable when spreads widen later.
+        """
+        min_spread = max(self.target_spread, 0.02)
+        now = time.time()
+        skipped = 0
+
+        for tid, state in self.market_states.items():
             book = self.client.get_order_book(tid)
             if not book:
                 continue
             if book.spread < min_spread:
-                self.logger.info("Dropping %s: real spread %.4f < min %.4f",
+                # Temporary cooldown (30 min) instead of permanent removal
+                state.last_quote_time = now + 1800
+                skipped += 1
+                self.logger.info("Soft-skip %s: spread %.4f < %.4f (30min cooldown)",
                                  state.outcome, book.spread, min_spread)
-                to_remove.append(tid)
 
-        for tid in to_remove:
-            del self.market_states[tid]
-
-        if to_remove and hasattr(self, '_backup_candidates') and self._backup_candidates:
-            replacements = self._backup_candidates[:len(to_remove)]
-            self._backup_candidates = self._backup_candidates[len(to_remove):]
-            new_token_ids = []
-            for market in replacements:
-                for token in market.tokens:
-                    tid = token["token_id"]
-                    new_token_ids.append(tid)
-                    self.market_states[tid] = MarketState(
-                        token_id=tid, market_id=market.id,
-                        outcome=token.get("outcome", ""), fee_rate=market.fee,
-                    )
-            if new_token_ids:
-                await self.client.subscribe_market(new_token_ids)
-                self.logger.info("Replaced %d tokens with backups", len(new_token_ids))
-
-        active = len(self.market_states)
-        self.logger.info("Post-WS validation: %d tokens dropped, %d active", len(to_remove), active)
+        self.logger.info("Post-WS validation: %d tokens soft-skipped, %d active",
+                         skipped, len(self.market_states))
 
     async def _on_book_update(self, token_id: str, book: OrderBook):
         """Handle real-time book updates from WebSocket."""
