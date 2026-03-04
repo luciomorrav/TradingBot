@@ -445,12 +445,21 @@ class PolyMarketMaker(BaseStrategy):
                     quoted_this_token = True
 
             if quoted_this_token:
-                state.last_quote_time = now
+                state._pending_quote = True  # mark for cooldown after cap
 
-        # Rate limit guard: cap signals per cycle to stay under 50 orders/min
-        MAX_SIGNALS_PER_CYCLE = 6
+        # Rate limit guard: 4 signals/cycle × ~6 cycles/min = 24 places/min
+        # plus cancels from lifecycle — stays safely under 50/min limit
+        MAX_SIGNALS_PER_CYCLE = 4
         if len(signals) > MAX_SIGNALS_PER_CYCLE:
             signals = signals[:MAX_SIGNALS_PER_CYCLE]
+
+        # Only update cooldown for tokens whose signals survived the cap
+        surviving_tids = {s.metadata["token_id"] for s in signals}
+        for tid, state in self.market_states.items():
+            if getattr(state, "_pending_quote", False):
+                if tid in surviving_tids:
+                    state.last_quote_time = now
+                state._pending_quote = False
 
         if signals:
             self.logger.info("Generated %d signals this cycle", len(signals))
@@ -719,7 +728,7 @@ class PolyMarketMaker(BaseStrategy):
         Unlike the old behavior (permanent removal), this applies a temporary
         cooldown so tokens can become quotable when spreads widen later.
         """
-        min_spread = max(self.target_spread, 0.02)
+        min_spread = self.target_spread
         now = time.time()
         skipped = 0
 

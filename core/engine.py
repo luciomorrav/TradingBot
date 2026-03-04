@@ -496,10 +496,10 @@ class Engine:
                 await asyncio.sleep(60)
                 now = time.time()
                 stale = [oid for oid, p in self._pending_orders.items()
-                         if now - p["placed_at"] > 300]  # 5 min TTL
+                         if now - p["placed_at"] > 150]  # 2.5 min (MM TTL 120s + buffer)
                 for oid in stale:
                     del self._pending_orders[oid]
-                    logger.warning("Pending order expired (no fill after 5min): %s", oid[:12])
+                    logger.warning("Pending order expired (no fill after 2.5min): %s", oid[:12])
                 if stale:
                     self._update_reserved_cash()
             except asyncio.CancelledError:
