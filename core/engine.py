@@ -496,7 +496,7 @@ class Engine:
                 await asyncio.sleep(60)
                 now = time.time()
                 stale = [oid for oid, p in self._pending_orders.items()
-                         if now - p["placed_at"] > 150]  # 2.5 min (MM TTL 120s + buffer)
+                         if now - p["placed_at"] > 360]  # 6 min (MM TTL 300s + buffer)
                 for oid in stale:
                     del self._pending_orders[oid]
                     logger.warning("Pending order expired (no fill after 2.5min): %s", oid[:12])

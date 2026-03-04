@@ -17,9 +17,9 @@ polymarket:
   market_maker:
     target_spread: 0.02  # 2c min spread (A-S floor)
     max_inventory: 12    # USD — cap directional exposure per token
-    repost_threshold: 0.01  # repost if market moves > 1c (was 2c)
-    order_ttl: 120        # seconds before order is stale (was 300 — faster requoting)
-    quote_cooldown: 20    # seconds between signals per token (was 45)
+    repost_threshold: 0.02  # repost if market moves > 2c
+    order_ttl: 300        # seconds — longer time-in-book = better price-time priority
+    quote_cooldown: 20    # seconds between signals per token (only matters after cancel)
     min_volume: 500       # raised: better quality markets
     max_volume: 10000
     max_markets: 5        # more markets = more fill opportunities
