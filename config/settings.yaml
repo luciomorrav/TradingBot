@@ -79,6 +79,8 @@ polymarket:
     market_refresh_seconds: 3600 # refresh shortlist every hour
     min_volume: 1000             # higher volume = more newsworthy markets
     min_hours_to_expiry: 48      # 2 days min
+    min_yes_price: 0.08          # skip obvious No (Yes < 8c)
+    max_yes_price: 0.92          # skip obvious Yes (Yes > 92c)
 
 ib:
   host: 127.0.0.1

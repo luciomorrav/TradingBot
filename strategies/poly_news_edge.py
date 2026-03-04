@@ -60,6 +60,8 @@ class PolyNewsEdge(BaseStrategy):
         self.max_markets = ne.get("max_markets", 10)
         self.ne_min_volume = ne.get("min_volume", 1000)
         self.ne_min_hours = ne.get("min_hours_to_expiry", 48)
+        self.min_yes_price = ne.get("min_yes_price", 0.08)
+        self.max_yes_price = ne.get("max_yes_price", 0.92)
 
         # Reuse MM's sports filters from parent config
         mm_cfg = config.get("market_maker", {})
@@ -71,6 +73,13 @@ class PolyNewsEdge(BaseStrategy):
         self._last_refresh = 0.0
         # market_id → (timestamp, news_hash) — dedup + cooldown
         self._analyzed: dict[str, tuple[float, str]] = {}
+
+        # Shadow metrics (reset each evaluate cycle)
+        self._shadow_analyzed = 0
+        self._shadow_skipped_dedup = 0
+        self._shadow_skipped_price = 0
+        self._shadow_skipped_edge = 0
+        self._shadow_signals = 0
 
         self._live_mode = False  # set by main.py
 
@@ -86,6 +95,13 @@ class PolyNewsEdge(BaseStrategy):
 
     async def evaluate(self) -> list[Signal]:
         signals: list[Signal] = []
+
+        # Reset shadow counters each cycle
+        self._shadow_analyzed = 0
+        self._shadow_skipped_dedup = 0
+        self._shadow_skipped_price = 0
+        self._shadow_skipped_edge = 0
+        self._shadow_signals = 0
 
         # 1. Refresh market shortlist periodically
         if time.time() - self._last_refresh > self.market_refresh_seconds:
@@ -108,9 +124,20 @@ class PolyNewsEdge(BaseStrategy):
             sig = await self._analyze_market(market, cap - ne_exposure)
             if sig:
                 signals.append(sig)
+                self._shadow_signals += 1
                 ne_exposure += sig.size_usd
                 if ne_exposure >= cap:
                     break
+
+        # 5. Log shadow metrics summary
+        if self._shadow_analyzed > 0 or self._shadow_skipped_dedup > 0:
+            self.logger.info(
+                "Shadow metrics: analyzed=%d skipped_dedup=%d skipped_price=%d "
+                "skipped_edge=%d signals=%d",
+                self._shadow_analyzed, self._shadow_skipped_dedup,
+                self._shadow_skipped_price, self._shadow_skipped_edge,
+                self._shadow_signals,
+            )
 
         return signals
 
@@ -186,8 +213,10 @@ class PolyNewsEdge(BaseStrategy):
         if market_id in self._analyzed:
             last_ts, last_hash = self._analyzed[market_id]
             if news_hash == last_hash:
+                self._shadow_skipped_dedup += 1
                 return None  # same news — no point re-analyzing
             if time.time() - last_ts < self.cooldown_hours * 3600:
+                self._shadow_skipped_dedup += 1
                 return None  # different news but cooldown still active
 
         # Pick the "Yes" outcome for analysis (binary market)
@@ -203,6 +232,7 @@ class PolyNewsEdge(BaseStrategy):
         headline_titles = [h["title"] for h in headlines if h.get("title")]
 
         # Call LLM
+        self._shadow_analyzed += 1
         result = await self.llm.estimate_probability(
             market_question=market.question,
             outcome_name="Yes",
@@ -230,6 +260,7 @@ class PolyNewsEdge(BaseStrategy):
 
         # Edge + confidence check
         if abs(edge) < self.edge_threshold or conf < self.min_confidence:
+            self._shadow_skipped_edge += 1
             return None
 
         # Determine which token to buy
@@ -253,6 +284,7 @@ class PolyNewsEdge(BaseStrategy):
 
         # Minimum price guard — skip if price is too low to be meaningful
         if buy_price < 0.02:
+            self._shadow_skipped_price += 1
             self.logger.debug("Skip %s: buy_price %.4f too low", market.question[:40], buy_price)
             return None
 
@@ -324,6 +356,15 @@ class PolyNewsEdge(BaseStrategy):
             hours_left = self._hours_to_expiry(m.end_date)
             if 0 < hours_left < self.ne_min_hours:
                 continue
+            # Price filter — skip obvious outcomes (Yes ≈ 0 or ≈ 1)
+            yes_price = None
+            for t in m.tokens:
+                if t.get("outcome", "").lower() == "yes":
+                    yes_price = t.get("price", 0.5)
+                    break
+            if yes_price is not None:
+                if yes_price < self.min_yes_price or yes_price > self.max_yes_price:
+                    continue
             candidates.append(m)
 
         # Sort by volume descending, take top N

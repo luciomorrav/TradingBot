@@ -386,7 +386,25 @@ class Engine:
             }))
 
         if not matched_orders:
-            return  # not our order
+            # Log unmatched fills — likely our order whose pending expired during WS downtime
+            maker_ids = [m.get("order_id", "?")[:12] for m in fill_data.get("maker_orders", [])]
+            logger.warning(
+                "Fill MATCHED but no pending order found (cleanup timeout?). "
+                "taker=%s makers=%s asset=%s price=%s size=%s | pending_keys=%d",
+                taker_id[:12] if taker_id else "none",
+                maker_ids,
+                fill_data.get("asset_id", "?")[:12],
+                fill_data.get("price", "?"),
+                fill_data.get("size", "?"),
+                len(self._pending_orders),
+            )
+            if self.notify_callback:
+                await self.notify_callback(
+                    f"⚠️ Fill received but unmatched (WS downtime?): "
+                    f"price={fill_data.get('price', '?')} "
+                    f"size={fill_data.get('size', '?')}"
+                )
+            return
 
         for order_id, fill_info in matched_orders:
             pending = self._pending_orders.get(order_id)
@@ -499,7 +517,7 @@ class Engine:
                          if now - p["placed_at"] > 360]  # 6 min (MM TTL 300s + buffer)
                 for oid in stale:
                     del self._pending_orders[oid]
-                    logger.warning("Pending order expired (no fill after 2.5min): %s", oid[:12])
+                    logger.warning("Pending order expired (no fill after 6min): %s", oid[:12])
                 if stale:
                     self._update_reserved_cash()
             except asyncio.CancelledError:
