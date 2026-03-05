@@ -70,6 +70,16 @@ class ExecutionRouter:
 
             token_id = sig.metadata.get("token_id", sig.market_id)
 
+            # Pre-check available balance for BUY orders
+            if side == "BUY" and hasattr(client, "get_exchange_balance"):
+                balance = await client.get_exchange_balance()
+                if balance is not None and sig.size_usd > balance:
+                    logger.warning(
+                        "Insufficient balance for %s: need $%.2f, have $%.2f",
+                        sig.symbol, sig.size_usd, balance,
+                    )
+                    return None
+
             result = await client.place_order(
                 token_id=token_id,
                 side=side,

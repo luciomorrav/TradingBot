@@ -68,7 +68,7 @@ polymarket:
     enabled: true
     shadow_mode: true            # log signals only, no real orders — validate 5-7 days first
     edge_threshold: 0.12         # LLM must differ from market by >12%
-    min_confidence: 0.65         # LLM must be >65% confident
+    min_confidence: 0.50         # LLM must be >50% confident (lowered: 0.65 too restrictive)
     max_position_per_market: 10  # USD per directional bet
     strategy_cap_pct: 10.0       # max 10% of equity for News Edge total
     max_markets: 10              # markets to scan per cycle
@@ -79,6 +79,7 @@ polymarket:
     market_refresh_seconds: 3600 # refresh shortlist every hour
     min_volume: 1000             # higher volume = more newsworthy markets
     min_hours_to_expiry: 48      # 2 days min
+    max_end_date_days: 30        # skip markets expiring in >30 days (long-term = no news edge)
     min_yes_price: 0.08          # skip obvious No (Yes < 8c)
     max_yes_price: 0.92          # skip obvious Yes (Yes > 92c)
 

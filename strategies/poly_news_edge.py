@@ -62,6 +62,7 @@ class PolyNewsEdge(BaseStrategy):
         self.ne_min_hours = ne.get("min_hours_to_expiry", 48)
         self.min_yes_price = ne.get("min_yes_price", 0.08)
         self.max_yes_price = ne.get("max_yes_price", 0.92)
+        self.max_end_date_days = ne.get("max_end_date_days", 30)
 
         # Reuse MM's sports filters from parent config
         mm_cfg = config.get("market_maker", {})
@@ -355,6 +356,10 @@ class PolyNewsEdge(BaseStrategy):
             # Expiry filter
             hours_left = self._hours_to_expiry(m.end_date)
             if 0 < hours_left < self.ne_min_hours:
+                continue
+            # Max expiry filter -- skip long-term markets (no news edge)
+            max_hours = self.max_end_date_days * 24
+            if hours_left > max_hours:
                 continue
             # Price filter — skip obvious outcomes (Yes ≈ 0 or ≈ 1)
             yes_price = None
