@@ -91,6 +91,7 @@ class PolyMarketMaker(BaseStrategy):
         self.gamma = self.mm_config.get("gamma", 10.0)  # risk aversion (higher = wider spreads)
         self.kappa = self.mm_config.get("kappa", 100.0)  # order arrival intensity (higher = tighter spreads)
         self.min_order_shares = self.mm_config.get("min_order_shares", 5)  # Polymarket minimum
+        self.max_total_inventory_pct = self.mm_config.get("max_total_inventory_pct", 25)  # global BUY gate
 
         self.market_states: dict[str, MarketState] = {}  # token_id -> state
         self._active_orders: dict[str, LiveOrder] = {}    # order_id -> LiveOrder
@@ -276,6 +277,19 @@ class PolyMarketMaker(BaseStrategy):
             self.logger.info("Waiting for orderbooks (%d tokens subscribed)", len(self.market_states))
             return signals
 
+        # Global inventory gate: sum all token inventories in USD
+        total_inventory_usd = sum(
+            s.inventory * s.last_mid for s in self.market_states.values()
+            if s.inventory > 0 and s.last_mid > 0
+        )
+        inventory_cap = self.portfolio.equity * self.max_total_inventory_pct / 100
+        global_buy_blocked = total_inventory_usd > inventory_cap
+        if global_buy_blocked:
+            self.logger.info(
+                "Global BUY gate: inventory $%.1f > cap $%.1f (%.0f%% equity) -- sell-only mode",
+                total_inventory_usd, inventory_cap, self.max_total_inventory_pct,
+            )
+
         for tid, state in self.market_states.items():
             book = self.client.get_order_book(tid)
             if not book or book.spread <= 0:
@@ -341,8 +355,11 @@ class PolyMarketMaker(BaseStrategy):
                 if has_buy and has_sell:
                     continue
 
+                # Per-token sell-only: skip BUY when inventory > 50% of max
+                token_buy_blocked = inventory_usd > self.max_inventory * 0.5
+
                 # BUY side
-                if not has_buy and bid_price > 0.01 and inventory_usd < self.max_inventory:
+                if not has_buy and bid_price > 0.01 and inventory_usd < self.max_inventory and not global_buy_blocked and not token_buy_blocked:
                     size = min(base_size, self.portfolio.available_cash)
                     if size >= 1:
                         shares_bid = size / max(bid_price, 0.01)

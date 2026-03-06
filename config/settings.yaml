@@ -22,11 +22,12 @@ polymarket:
     quote_cooldown: 20    # seconds between signals per token (only matters after cancel)
     min_volume: 500       # raised: better quality markets
     max_volume: 10000
-    max_markets: 5        # more markets = more fill opportunities
+    max_markets: 2        # concentrated: 2 markets for $340 capital
     min_liquidity: 100    # raised: skip thin books (was 50)
     gamma: 7.0            # A-S risk aversion (was 5 → spread ~3.3c, reduces adverse selection)
     kappa: 150.0          # A-S order intensity (was 100 → tighter spread)
     min_order_shares: 5   # Polymarket minimum order size (shares)
+    max_total_inventory_pct: 25  # global BUY gate: block new buys when total inventory > 25% equity
     min_hours_to_expiry: 72  # 3 days min — blocks sports/short-resolution markets
     excluded_categories:  # category filter (if API provides it)
       - "Sports"
