@@ -17,7 +17,6 @@ from core.execution_router import ExecutionRouter
 from core.portfolio import Portfolio
 from core.risk_manager import RiskConfig, RiskManager
 from data.db import Database
-from strategies.poly_market_maker import PolyMarketMaker
 from utils.helpers import load_config
 from utils.logger import setup_logging
 
@@ -67,16 +66,6 @@ async def main():
     await poly_client.connect()
 
     # --- Strategies ---
-    mm = PolyMarketMaker(
-        name="poly_mm",
-        portfolio=portfolio,
-        risk_manager=risk_manager,
-        config=config.get("polymarket", {}),
-        poly_client=poly_client,
-    )
-    mm._db = db
-    mm._live_mode = (mode == "live")
-    engine.add_strategy(mm, interval_seconds=5.0)
 
     # --- News Edge strategy (only if enabled + ANTHROPIC_API_KEY set) ---
     ne_config = config.get("polymarket", {}).get("news_edge", {})

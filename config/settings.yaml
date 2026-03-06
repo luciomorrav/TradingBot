@@ -15,6 +15,7 @@ polymarket:
   max_position_per_market: 12  # USD — Phase 3 tighter exposure
   paper_fee_rate: 0.000  # Polymarket maker fee = 0% — paper mode matches live
   market_maker:
+    enabled: false        # MM disabled — accumulates inventory at $340 capital
     target_spread: 0.02  # 2c min spread (A-S floor)
     max_inventory: 12    # USD — cap directional exposure per token
     repost_threshold: 0.02  # repost if market moves > 2c
