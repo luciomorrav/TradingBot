@@ -64,10 +64,11 @@ class PolyNewsEdge(BaseStrategy):
         self.max_yes_price = ne.get("max_yes_price", 0.92)
         self.max_end_date_days = ne.get("max_end_date_days", 30)
 
-        # Reuse MM's sports filters from parent config
-        mm_cfg = config.get("market_maker", {})
-        self._excluded_keywords = mm_cfg.get("excluded_keywords", [])
-        self._excluded_categories = mm_cfg.get("excluded_categories", [])
+        # Sports/noise filters — check news_edge config first, fall back to market_maker
+        self._excluded_keywords = ne.get("excluded_keywords",
+            config.get("market_maker", {}).get("excluded_keywords", []))
+        self._excluded_categories = ne.get("excluded_categories",
+            config.get("market_maker", {}).get("excluded_categories", []))
 
         # State
         self._markets: list[Market] = []

@@ -84,6 +84,34 @@ polymarket:
     max_end_date_days: 30        # skip markets expiring in >30 days (long-term = no news edge)
     min_yes_price: 0.08          # skip obvious No (Yes < 8c)
     max_yes_price: 0.92          # skip obvious Yes (Yes > 92c)
+    excluded_categories:
+      - "Sports"
+    excluded_keywords:
+      - "vs."
+      - " vs "
+      - "match"
+      - "winner of"
+      - "qualify"
+      - "FIFA"
+      - "World Cup"
+      - "Serie A"
+      - "La Liga"
+      - "Premier League"
+      - "Bundesliga"
+      - "Ligue 1"
+      - "Champions League"
+      - "Europa League"
+      - "UFC"
+      - "NBA"
+      - "NFL"
+      - "MLB"
+      - "NHL"
+      - "ATP"
+      - "WTA"
+      - "IPL"
+      - "MLS"
+      - "F1"
+      - "Grand Prix"
 
 ib:
   host: 127.0.0.1
