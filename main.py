@@ -65,6 +65,12 @@ async def main():
     poly_client.set_notify(tg.send_message)  # WS disconnect/reconnect alerts
     await poly_client.connect()
 
+    # Cancel any residual orders from previous session (e.g. after deploy/restart)
+    if mode == "live":
+        cancelled = await poly_client.cancel_all_orders()
+        if cancelled:
+            logger.info("Startup: cancelled %d residual orders", cancelled)
+
     # --- Strategies ---
 
     # --- News Edge strategy (only if enabled + ANTHROPIC_API_KEY set) ---
