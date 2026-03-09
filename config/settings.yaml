@@ -143,8 +143,6 @@ kalshi:  # Fase 4
 llm:
   provider: anthropic
   model: claude-haiku-4-5-20251001
-  fallback_model: claude-sonnet-4-6
-  validate_model_on_startup: true
   api_key: ${ANTHROPIC_API_KEY}
   max_cost_per_day: 0.50
 

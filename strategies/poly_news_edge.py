@@ -64,11 +64,9 @@ class PolyNewsEdge(BaseStrategy):
         self.max_yes_price = ne.get("max_yes_price", 0.92)
         self.max_end_date_days = ne.get("max_end_date_days", 30)
 
-        # Sports/noise filters — check news_edge config first, fall back to market_maker
-        self._excluded_keywords = ne.get("excluded_keywords",
-            config.get("market_maker", {}).get("excluded_keywords", []))
-        self._excluded_categories = ne.get("excluded_categories",
-            config.get("market_maker", {}).get("excluded_categories", []))
+        # Sports/noise filters
+        self._excluded_keywords = ne.get("excluded_keywords", [])
+        self._excluded_categories = ne.get("excluded_categories", [])
 
         # State
         self._markets: list[Market] = []
@@ -88,7 +86,6 @@ class PolyNewsEdge(BaseStrategy):
         self._shadow_skipped_edge = 0
         self._shadow_signals = 0
 
-        self._live_mode = False  # set by main.py
         self._db = None  # assigned by main.py for shadow state persistence
 
     async def on_start(self):
