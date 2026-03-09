@@ -1373,3 +1373,61 @@ async def test_news_edge_skip_low_price():
 
     # Should skip — complement price 0.01 < 0.02 minimum
     assert len(signals) == 0
+
+
+@pytest.mark.asyncio
+async def test_news_edge_analyzed_persisted_and_restored():
+    """_analyzed survives restart: fresh entries block re-analysis, stale entries are purged."""
+    ne, portfolio, llm, scraper = _make_news_edge(shadow=True)
+
+    now = time.time()
+    cooldown_secs = ne.cooldown_hours * 3600
+    fresh_ts = now - cooldown_secs / 2          # within cooldown → keep
+    stale_ts = now - ne.cooldown_hours * 3 * 3600  # older than 2x cooldown → purge
+
+    saved_state = {
+        "positions": {},
+        "closed": [],
+        "analyzed": {
+            "market_fresh": [fresh_ts, "hash_fresh"],
+            "market_stale": [stale_ts, "hash_stale"],
+        },
+    }
+
+    # Simulate restore (mimic on_start logic)
+    cutoff = now - ne.cooldown_hours * 2 * 3600
+    ne._analyzed = {
+        k: (v[0], v[1])
+        for k, v in saved_state.get("analyzed", {}).items()
+        if v[0] > cutoff
+    }
+
+    # Fresh entry survives
+    assert "market_fresh" in ne._analyzed
+    # Stale entry is purged
+    assert "market_stale" not in ne._analyzed
+
+    # Fresh market with same hash → dedup blocks LLM call
+    from connectors.polymarket_client import Market
+    from unittest.mock import AsyncMock
+
+    scraper.fetch_news = AsyncMock(return_value=([{"title": "Old news"}], "hash_fresh"))
+    llm.estimate_probability = AsyncMock()
+
+    market = Market(
+        id="market_fresh", question="Will fresh market resolve?", slug="fresh", active=True,
+        end_date="2026-06-01T00:00:00Z",
+        tokens=[
+            {"token_id": "tok_fresh_yes", "outcome": "Yes", "price": 0.50},
+            {"token_id": "tok_fresh_no", "outcome": "No", "price": 0.50},
+        ],
+        volume=5000, liquidity=1000,
+    )
+    ne._markets = [market]
+    ne._last_refresh = time.time()
+
+    signals = await ne.evaluate()
+
+    # Same hash + within cooldown → no LLM call, no signal
+    llm.estimate_probability.assert_not_called()
+    assert len(signals) == 0

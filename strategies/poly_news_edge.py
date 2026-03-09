@@ -99,8 +99,13 @@ class PolyNewsEdge(BaseStrategy):
                 self._shadow_positions = saved.get("positions", {})
                 self._shadow_closed = saved.get("closed", [])
                 # Restore analyzed dict: lists → tuples (timestamp, news_hash)
+                # Purge entries older than 2x cooldown — they're stale and would
+                # incorrectly block fresh analysis after a long downtime.
+                cutoff = time.time() - self.cooldown_hours * 2 * 3600
                 self._analyzed = {
-                    k: (v[0], v[1]) for k, v in saved.get("analyzed", {}).items()
+                    k: (v[0], v[1])
+                    for k, v in saved.get("analyzed", {}).items()
+                    if v[0] > cutoff
                 }
                 self.logger.info(
                     "Shadow portfolio restored: %d open positions, %d closed trades, %d analyzed",
