@@ -94,6 +94,7 @@ async def main():
             news_scraper=news_scraper,
         )
         news_edge._live_mode = (mode == "live")
+        news_edge._db = db
         engine.add_strategy(news_edge, interval_seconds=600.0)  # 10 min
         logger.info("News Edge strategy enabled (%s mode)",
                      "shadow" if ne_config.get("shadow_mode", True) else "live")

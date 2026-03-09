@@ -89,8 +89,20 @@ class PolyNewsEdge(BaseStrategy):
         self._shadow_signals = 0
 
         self._live_mode = False  # set by main.py
+        self._db = None  # assigned by main.py for shadow state persistence
 
     async def on_start(self):
+        # Restore shadow portfolio from DB before refreshing markets
+        if self._db is not None and self.shadow_mode:
+            saved = await self._db.load_state("ne_shadow_state")
+            if saved:
+                self._shadow_positions = saved.get("positions", {})
+                self._shadow_closed = saved.get("closed", [])
+                self.logger.info(
+                    "Shadow portfolio restored: %d open positions, %d closed trades",
+                    len(self._shadow_positions), len(self._shadow_closed),
+                )
+
         await self._refresh_markets()
         # Subscribe to price updates for existing NE positions (may not be in shortlist)
         await self._subscribe_positions()
@@ -116,7 +128,7 @@ class PolyNewsEdge(BaseStrategy):
 
         # 2a. Check shadow positions for TP/SL/timeout (shadow mode only)
         if self.shadow_mode:
-            self._check_shadow_exits()
+            await self._check_shadow_exits()
 
         # 2b. Check real positions for TP/SL/timeout exits
         signals.extend(self._check_exits())
@@ -203,7 +215,7 @@ class PolyNewsEdge(BaseStrategy):
                 ))
         return signals
 
-    def _check_shadow_exits(self):
+    async def _check_shadow_exits(self):
         """Check shadow positions for TP/SL/timeout and record virtual PnL."""
         now = time.time()
         for token_id, pos in list(self._shadow_positions.items()):
@@ -242,9 +254,13 @@ class PolyNewsEdge(BaseStrategy):
                     pnl_pct * 100, pnl_usd, hold_hours,
                 )
                 self._log_shadow_metrics()
+                await self._save_shadow_state()
 
     def _get_shadow_price(self, token_id: str) -> float:
-        """Look up current token price from market shortlist."""
+        """Look up current token price: WS orderbook first, shortlist fallback."""
+        book = self.client.get_order_book(token_id)
+        if book and book.mid_price > 0:
+            return book.mid_price
         for market in self._markets:
             for t in market.tokens:
                 if t["token_id"] == token_id:
@@ -265,6 +281,15 @@ class PolyNewsEdge(BaseStrategy):
             "total_pnl=$%+.2f | open_positions=%d",
             len(closed), win_rate, avg_return, total_pnl, len(self._shadow_positions),
         )
+
+    async def _save_shadow_state(self):
+        """Persist shadow portfolio to DB so it survives restarts."""
+        if self._db is None:
+            return
+        await self._db.save_state("ne_shadow_state", {
+            "positions": self._shadow_positions,
+            "closed": self._shadow_closed,
+        })
 
     async def _analyze_market(self, market: Market, remaining_cap: float) -> Signal | None:
         """Analyze a single market: news → LLM → signal (or None)."""
@@ -389,6 +414,7 @@ class PolyNewsEdge(BaseStrategy):
                 "size_usd": size_usd,
                 "entry_time": time.time(),
             }
+            await self._save_shadow_state()
 
         self.logger.info(
             "%s signal: BUY %s %s $%.0f @ %.4f (edge %+.0f%%, conf %.0f%%)",
@@ -458,10 +484,14 @@ class PolyNewsEdge(BaseStrategy):
         candidates.sort(key=lambda m: m.volume, reverse=True)
         self._markets = candidates[:self.max_markets]
 
-        # Subscribe to WS for price updates
+        # Subscribe to WS for price updates (shortlist + any open shadow positions)
         token_ids = [t["token_id"] for m in self._markets for t in m.tokens]
-        if token_ids:
-            await self.client.subscribe_market(token_ids)
+        shadow_extras = [tid for tid in self._shadow_positions if tid not in token_ids]
+        all_tokens = token_ids + shadow_extras
+        if all_tokens:
+            await self.client.subscribe_market(all_tokens)
+        if shadow_extras:
+            self.logger.debug("Re-subscribed %d shadow position tokens not in shortlist", len(shadow_extras))
 
         self.logger.info(
             "News Edge: refreshed %d markets (from %d candidates)",
