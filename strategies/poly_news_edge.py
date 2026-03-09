@@ -281,14 +281,22 @@ class PolyNewsEdge(BaseStrategy):
         closed = self._shadow_closed
         if not closed:
             return
-        wins = sum(1 for t in closed if t["pnl_pct"] > 0)
-        win_rate = wins / len(closed) * 100
+        wins = [t for t in closed if t["pnl_pct"] > 0]
+        losses = [t for t in closed if t["pnl_pct"] <= 0]
+        win_rate = len(wins) / len(closed) * 100
         avg_return = sum(t["pnl_pct"] for t in closed) / len(closed) * 100
+        avg_win = sum(t["pnl_pct"] for t in wins) / len(wins) * 100 if wins else 0.0
+        avg_loss = sum(t["pnl_pct"] for t in losses) / len(losses) * 100 if losses else 0.0
         total_pnl = sum(t["pnl_usd"] for t in closed)
+        # Expectancy: avg_win * win_rate - avg_loss * loss_rate (as fractions, not %)
+        expectancy = (avg_win * len(wins) - abs(avg_loss) * len(losses)) / len(closed)
+        hold_hours = sorted(t["hold_hours"] for t in closed)
+        median_hold = hold_hours[len(hold_hours) // 2]
         self.logger.info(
-            "Shadow portfolio: %d closed trades | win_rate=%.0f%% | avg_return=%+.1f%% | "
-            "total_pnl=$%+.2f | open_positions=%d",
-            len(closed), win_rate, avg_return, total_pnl, len(self._shadow_positions),
+            "Shadow portfolio: %d closed | win_rate=%.0f%% | avg_win=%+.1f%% avg_loss=%+.1f%% | "
+            "expectancy=%+.2f%% | total_pnl=$%+.2f | median_hold=%.1fh | open=%d",
+            len(closed), win_rate, avg_win, avg_loss,
+            expectancy, total_pnl, median_hold, len(self._shadow_positions),
         )
 
     async def _save_shadow_state(self):
