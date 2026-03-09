@@ -76,6 +76,11 @@ class PolyNewsEdge(BaseStrategy):
         # market_id → (timestamp, news_hash) — dedup + cooldown
         self._analyzed: dict[str, tuple[float, str]] = {}
 
+        # Shadow portfolio — virtual positions to measure strategy quality before live
+        # token_id → {question, side, entry_price, size_usd, entry_time}
+        self._shadow_positions: dict[str, dict] = {}
+        self._shadow_closed: list[dict] = []  # completed shadow trades
+
         # Shadow metrics (reset each evaluate cycle)
         self._shadow_analyzed = 0
         self._shadow_skipped_dedup = 0
@@ -109,7 +114,11 @@ class PolyNewsEdge(BaseStrategy):
         if time.time() - self._last_refresh > self.market_refresh_seconds:
             await self._refresh_markets()
 
-        # 2. Check existing positions for TP/SL/timeout exits
+        # 2a. Check shadow positions for TP/SL/timeout (shadow mode only)
+        if self.shadow_mode:
+            self._check_shadow_exits()
+
+        # 2b. Check real positions for TP/SL/timeout exits
         signals.extend(self._check_exits())
 
         # 3. Check strategy cap before scanning for new entries
@@ -194,16 +203,80 @@ class PolyNewsEdge(BaseStrategy):
                 ))
         return signals
 
+    def _check_shadow_exits(self):
+        """Check shadow positions for TP/SL/timeout and record virtual PnL."""
+        now = time.time()
+        for token_id, pos in list(self._shadow_positions.items()):
+            current_price = self._get_shadow_price(token_id)
+            if current_price <= 0:
+                continue
+
+            pnl_pct = (current_price - pos["entry_price"]) / pos["entry_price"]
+            hold_hours = (now - pos["entry_time"]) / 3600
+
+            close_reason = None
+            if pnl_pct >= self.take_profit:
+                close_reason = "TP"
+            elif pnl_pct <= -self.stop_loss:
+                close_reason = "SL"
+            elif hold_hours >= self.max_hold_hours:
+                close_reason = "timeout"
+
+            if close_reason:
+                pnl_usd = pos["size_usd"] * pnl_pct
+                self._shadow_closed.append({
+                    "side": pos["side"],
+                    "question": pos["question"],
+                    "entry_price": pos["entry_price"],
+                    "exit_price": current_price,
+                    "pnl_pct": pnl_pct,
+                    "pnl_usd": pnl_usd,
+                    "hold_hours": hold_hours,
+                    "reason": close_reason,
+                })
+                del self._shadow_positions[token_id]
+                self.logger.info(
+                    "Shadow close [%s]: %s %s @ %.4f->%.4f (PnL %+.1f%% / $%+.2f, %.1fh)",
+                    close_reason, pos["side"], pos["question"][:35],
+                    pos["entry_price"], current_price,
+                    pnl_pct * 100, pnl_usd, hold_hours,
+                )
+                self._log_shadow_metrics()
+
+    def _get_shadow_price(self, token_id: str) -> float:
+        """Look up current token price from market shortlist."""
+        for market in self._markets:
+            for t in market.tokens:
+                if t["token_id"] == token_id:
+                    return float(t.get("price", 0))
+        return 0.0
+
+    def _log_shadow_metrics(self):
+        """Log shadow portfolio performance metrics."""
+        closed = self._shadow_closed
+        if not closed:
+            return
+        wins = sum(1 for t in closed if t["pnl_pct"] > 0)
+        win_rate = wins / len(closed) * 100
+        avg_return = sum(t["pnl_pct"] for t in closed) / len(closed) * 100
+        total_pnl = sum(t["pnl_usd"] for t in closed)
+        self.logger.info(
+            "Shadow portfolio: %d closed trades | win_rate=%.0f%% | avg_return=%+.1f%% | "
+            "total_pnl=$%+.2f | open_positions=%d",
+            len(closed), win_rate, avg_return, total_pnl, len(self._shadow_positions),
+        )
+
     async def _analyze_market(self, market: Market, remaining_cap: float) -> Signal | None:
         """Analyze a single market: news → LLM → signal (or None)."""
         market_id = market.id
 
-        # Skip if already have a position in this market
+        # Skip if already have a real or shadow position in this market
+        market_token_ids = [t["token_id"] for t in market.tokens]
         for pos in self.portfolio.positions.values():
-            if pos.strategy == self.name and pos.market_id in [
-                t["token_id"] for t in market.tokens
-            ]:
+            if pos.strategy == self.name and pos.market_id in market_token_ids:
                 return None
+        if self.shadow_mode and any(tid in self._shadow_positions for tid in market_token_ids):
+            return None
 
         # Fetch news (cheap HTTP call — do before cooldown so breaking news
         # can bypass the 4h cooldown if headlines actually changed)
@@ -308,6 +381,14 @@ class PolyNewsEdge(BaseStrategy):
 
         if self.shadow_mode:
             metadata["shadow"] = True
+            # Register virtual position for shadow portfolio tracking
+            self._shadow_positions[token["token_id"]] = {
+                "question": market.question,
+                "side": token["outcome"],
+                "entry_price": buy_price,
+                "size_usd": size_usd,
+                "entry_time": time.time(),
+            }
 
         self.logger.info(
             "%s signal: BUY %s %s $%.0f @ %.4f (edge %+.0f%%, conf %.0f%%)",

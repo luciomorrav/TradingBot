@@ -10,6 +10,8 @@ import json
 import logging
 from datetime import datetime, timezone
 
+_RETRY_DELAYS = [1.0, 3.0, 8.0]  # seconds between retries on 529 overloaded
+
 logger = logging.getLogger(__name__)
 
 # Haiku pricing (per 1M tokens)
@@ -82,18 +84,34 @@ class LLMClient:
             client = self._ensure_client()
             loop = asyncio.get_running_loop()
 
-            resp = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: client.messages.create(
-                        model=self.model,
-                        max_tokens=200,
-                        system=_SYSTEM_PROMPT,
-                        messages=[{"role": "user", "content": user_msg}],
-                    ),
-                ),
-                timeout=30,
-            )
+            resp = None
+            for attempt, delay in enumerate([0.0] + _RETRY_DELAYS):
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                try:
+                    resp = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None,
+                            lambda: client.messages.create(
+                                model=self.model,
+                                max_tokens=200,
+                                system=_SYSTEM_PROMPT,
+                                messages=[{"role": "user", "content": user_msg}],
+                            ),
+                        ),
+                        timeout=30,
+                    )
+                    break  # success
+                except Exception as exc:
+                    # Retry only on 529 overloaded
+                    if "529" in str(exc) or "overloaded" in str(exc).lower():
+                        if attempt < len(_RETRY_DELAYS):
+                            logger.warning("LLM overloaded (529), retry %d in %.0fs", attempt + 1, _RETRY_DELAYS[attempt])
+                            continue
+                    raise  # non-retryable or out of retries
+
+            if resp is None:
+                return None
 
             # Parse response
             text = resp.content[0].text.strip()
