@@ -98,9 +98,13 @@ class PolyNewsEdge(BaseStrategy):
             if saved:
                 self._shadow_positions = saved.get("positions", {})
                 self._shadow_closed = saved.get("closed", [])
+                # Restore analyzed dict: lists → tuples (timestamp, news_hash)
+                self._analyzed = {
+                    k: (v[0], v[1]) for k, v in saved.get("analyzed", {}).items()
+                }
                 self.logger.info(
-                    "Shadow portfolio restored: %d open positions, %d closed trades",
-                    len(self._shadow_positions), len(self._shadow_closed),
+                    "Shadow portfolio restored: %d open positions, %d closed trades, %d analyzed",
+                    len(self._shadow_positions), len(self._shadow_closed), len(self._analyzed),
                 )
 
         await self._refresh_markets()
@@ -289,6 +293,8 @@ class PolyNewsEdge(BaseStrategy):
         await self._db.save_state("ne_shadow_state", {
             "positions": self._shadow_positions,
             "closed": self._shadow_closed,
+            # _analyzed: market_id → [timestamp, news_hash] (tuple serialized as list)
+            "analyzed": {k: list(v) for k, v in self._analyzed.items()},
         })
 
     async def _analyze_market(self, market: Market, remaining_cap: float) -> Signal | None:
