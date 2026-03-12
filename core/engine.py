@@ -321,6 +321,8 @@ class Engine:
         order_id = order_result.get("order_id", "")
         if not order_id:
             return
+        # NE limit orders can take much longer to fill than MM orders (TTL 300s)
+        timeout = 3600 if sig.strategy == "news_edge" else 360
         self._pending_orders[order_id] = {
             "sig": sig,
             "order_id": order_id,
@@ -329,9 +331,10 @@ class Engine:
             "price": sig.price,
             "size_usd": sig.size_usd,
             "placed_at": time.time(),
+            "timeout": timeout,
         }
-        logger.info("Pending order registered: %s %s $%.0f @ %.4f (id: %s)",
-                     sig.direction, sig.symbol, sig.size_usd, sig.price, order_id[:12])
+        logger.info("Pending order registered: %s %s $%.0f @ %.4f (id: %s, timeout: %ds)",
+                     sig.direction, sig.symbol, sig.size_usd, sig.price, order_id[:12], timeout)
 
     async def handle_fill(self, fill_data: dict):
         """Called by user WS when a trade/fill event arrives.
@@ -508,16 +511,36 @@ class Engine:
                 logger.exception("Error in heartbeat loop")
 
     async def _pending_order_cleanup_loop(self):
-        """Remove stale pending orders that never filled (live mode)."""
+        """Cancel stale pending orders on exchange and remove from tracking."""
         while self._running:
             try:
                 await asyncio.sleep(60)
                 now = time.time()
-                stale = [oid for oid, p in self._pending_orders.items()
-                         if now - p["placed_at"] > 360]  # 6 min (MM TTL 300s + buffer)
-                for oid in stale:
+                stale = [
+                    (oid, p) for oid, p in self._pending_orders.items()
+                    if now - p["placed_at"] > p.get("timeout", 360)
+                ]
+                for oid, pending in stale:
+                    # Cancel on exchange first — don't just drop tracking
+                    if self.poly_client:
+                        try:
+                            await self.poly_client.cancel_order(oid)
+                            logger.info("Stale order cancelled on exchange: %s", oid[:12])
+                        except Exception:
+                            logger.warning("Failed to cancel stale order on exchange: %s", oid[:12])
                     del self._pending_orders[oid]
-                    logger.warning("Pending order expired (no fill after 6min): %s", oid[:12])
+                    timeout_s = pending.get("timeout", 360)
+                    sig = pending.get("sig")
+                    sym = sig.symbol if sig else "?"
+                    logger.warning(
+                        "Pending order expired (no fill after %ds): %s %s $%.0f",
+                        timeout_s, oid[:12], sym, pending.get("size_usd", 0),
+                    )
+                    if self.notify_callback:
+                        await self.notify_callback(
+                            f"⏰ Order timeout: {sym} ${pending.get('size_usd', 0):.0f} "
+                            f"cancelled after {timeout_s // 60}min (no fill)"
+                        )
                 if stale:
                     self._update_reserved_cash()
             except asyncio.CancelledError:

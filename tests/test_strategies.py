@@ -1431,3 +1431,81 @@ async def test_news_edge_analyzed_persisted_and_restored():
     # Same hash + within cooldown → no LLM call, no signal
     llm.estimate_probability.assert_not_called()
     assert len(signals) == 0
+
+
+@pytest.mark.asyncio
+async def test_news_edge_exit_price_fallback():
+    """When current_price=0 but orderbook has price, fallback triggers exit."""
+    from core.portfolio import Platform, Side, Trade
+    from unittest.mock import MagicMock
+
+    ne, portfolio, llm, scraper = _make_news_edge(shadow=False)
+
+    # Open position with entry at 0.50
+    trade = Trade(
+        trade_id="t_fb", platform=Platform.POLYMARKET, market_id="tok_fb",
+        symbol="Yes — Fallback", side=Side.BUY, price=0.50, size=10.0, fee=0.0,
+        strategy="news_edge", timestamp=time.time() - 3600,
+    )
+    await portfolio.open_position(trade)
+
+    pos = list(portfolio.positions.values())[0]
+    assert pos.current_price == 0.0  # no WS update
+
+    # Mock orderbook returns high price → TP triggers
+    book_mock = MagicMock()
+    book_mock.mid_price = 0.65  # +30% → above TP threshold (20%)
+    ne.client.get_order_book = MagicMock(return_value=book_mock)
+
+    ne._markets = []
+    ne._last_refresh = time.time()
+
+    signals = await ne.evaluate()
+
+    # Should generate TP exit signal via fallback price
+    assert len(signals) == 1
+    assert signals[0].direction == "sell"
+    assert signals[0].metadata["reason"] == "TP"
+
+
+@pytest.mark.asyncio
+async def test_news_edge_max_open_positions():
+    """Max open positions cap prevents new entries when at limit."""
+    from core.portfolio import Platform, Side, Trade
+    from unittest.mock import AsyncMock
+    from connectors.polymarket_client import Market
+
+    ne, portfolio, llm, scraper = _make_news_edge(shadow=False)
+    ne.max_open_positions = 2
+
+    # Open 2 NE positions (at the cap)
+    for i in range(2):
+        trade = Trade(
+            trade_id=f"t_cap{i}", platform=Platform.POLYMARKET, market_id=f"tok_cap{i}",
+            symbol=f"Yes — Cap{i}", side=Side.BUY, price=0.50, size=5.0, fee=0.0,
+            strategy="news_edge", timestamp=time.time(),
+        )
+        await portfolio.open_position(trade)
+
+    # Set up a market with clear edge — would generate signal if not capped
+    scraper.fetch_news = AsyncMock(return_value=([{"title": "Big news"}], "hash_cap"))
+    llm.estimate_probability = AsyncMock(return_value={
+        "probability": 0.80, "confidence": 0.90, "reasoning": "Clear edge", "cost_usd": 0.001,
+    })
+    market = Market(
+        id="m_cap", question="Will capped event happen?", slug="capped", active=True,
+        end_date="2026-06-01T00:00:00Z",
+        tokens=[
+            {"token_id": "tok_cap_yes", "outcome": "Yes", "price": 0.50},
+            {"token_id": "tok_cap_no", "outcome": "No", "price": 0.50},
+        ],
+        volume=5000, liquidity=1000,
+    )
+    ne._markets = [market]
+    ne._last_refresh = time.time()
+
+    signals = await ne.evaluate()
+
+    # No new entries — max_open_positions reached
+    assert len(signals) == 0
+    llm.estimate_probability.assert_not_called()

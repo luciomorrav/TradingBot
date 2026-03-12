@@ -68,11 +68,12 @@ polymarket:
         expiry: 0.25         # was 0.10 — prioritize long-dated markets
   news_edge:
     enabled: true
-    shadow_mode: true            # log signals only, no real orders — validate 5-7 days first
+    shadow_mode: false           # LIVE — shadow validation passed (70% WR, +10% expectancy)
     edge_threshold: 0.12         # LLM must differ from market by >12%
     min_confidence: 0.65         # LLM must be >65% confident
-    max_position_per_market: 10  # USD per directional bet
+    max_position_per_market: 5   # USD per directional bet (reduced for live validation phase)
     strategy_cap_pct: 10.0       # max 10% of equity for News Edge total
+    max_open_positions: 3        # max concurrent NE positions
     max_markets: 10              # markets to scan per cycle
     cooldown_hours: 12           # don't re-analyze same market within 12h
     take_profit_pct: 0.20        # close at +20%

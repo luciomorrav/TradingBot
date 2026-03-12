@@ -63,6 +63,7 @@ class PolyNewsEdge(BaseStrategy):
         self.min_yes_price = ne.get("min_yes_price", 0.08)
         self.max_yes_price = ne.get("max_yes_price", 0.92)
         self.max_end_date_days = ne.get("max_end_date_days", 30)
+        self.max_open_positions = ne.get("max_open_positions", 3)
 
         # Sports/noise filters
         self._excluded_keywords = ne.get("excluded_keywords", [])
@@ -139,14 +140,19 @@ class PolyNewsEdge(BaseStrategy):
         # 2b. Check real positions for TP/SL/timeout exits
         signals.extend(self._check_exits())
 
-        # 3. Check strategy cap before scanning for new entries
-        ne_exposure = sum(
-            pos.size for pos in self.portfolio.positions.values()
+        # 3. Check strategy cap and max open positions before scanning for new entries
+        ne_positions = [
+            pos for pos in self.portfolio.positions.values()
             if pos.strategy == self.name
-        )
+        ]
+        ne_exposure = sum(pos.size for pos in ne_positions)
         cap = self.portfolio.equity * self.strategy_cap_pct / 100
         if ne_exposure >= cap:
             return signals  # exits only, no new entries
+
+        # Max concurrent positions guard
+        if len(ne_positions) >= self.max_open_positions:
+            return signals
 
         # 4. Scan markets for entry signals
         for market in self._markets:
@@ -178,9 +184,14 @@ class PolyNewsEdge(BaseStrategy):
                 continue
             if pos.avg_price <= 0:
                 continue
-            # Guard: skip exit check if no price update yet (e.g. after restart)
+            # Fallback: if WS price stale/missing, try orderbook or shortlist
             if pos.current_price <= 0:
-                continue
+                fallback = self._get_shadow_price(pos.market_id)
+                if fallback > 0:
+                    pos.current_price = fallback
+                    self.logger.debug("Price fallback for %s: %.4f", pos.symbol[:30], fallback)
+                else:
+                    continue
 
             pnl_pct = (pos.current_price - pos.avg_price) / pos.avg_price
             hold_hours = (time.time() - pos.entry_time) / 3600
@@ -264,9 +275,12 @@ class PolyNewsEdge(BaseStrategy):
 
     def _get_shadow_price(self, token_id: str) -> float:
         """Look up current token price: WS orderbook first, shortlist fallback."""
-        book = self.client.get_order_book(token_id)
-        if book and book.mid_price > 0:
-            return book.mid_price
+        try:
+            book = self.client.get_order_book(token_id)
+            if book and hasattr(book, "mid_price") and book.mid_price > 0:
+                return book.mid_price
+        except Exception:
+            pass
         for market in self._markets:
             for t in market.tokens:
                 if t["token_id"] == token_id:
@@ -289,11 +303,12 @@ class PolyNewsEdge(BaseStrategy):
         expectancy = (avg_win * len(wins) - abs(avg_loss) * len(losses)) / len(closed)
         hold_hours = sorted(t["hold_hours"] for t in closed)
         median_hold = hold_hours[len(hold_hours) // 2]
+        unique_markets = len({t["question"] for t in closed})
         self.logger.info(
             "Shadow portfolio: %d closed | win_rate=%.0f%% | avg_win=%+.1f%% avg_loss=%+.1f%% | "
-            "expectancy=%+.2f%% | total_pnl=$%+.2f | median_hold=%.1fh | open=%d",
+            "expectancy=%+.2f%% | total_pnl=$%+.2f | median_hold=%.1fh | open=%d | unique_markets=%d",
             len(closed), win_rate, avg_win, avg_loss,
-            expectancy, total_pnl, median_hold, len(self._shadow_positions),
+            expectancy, total_pnl, median_hold, len(self._shadow_positions), unique_markets,
         )
 
     async def _save_shadow_state(self):
