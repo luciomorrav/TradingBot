@@ -80,7 +80,7 @@ class PolyNewsEdge(BaseStrategy):
         self._shadow_positions: dict[str, dict] = {}
         self._shadow_closed: list[dict] = []  # completed shadow trades
 
-        # Shadow metrics (reset each evaluate cycle)
+        # Strategy metrics (reset each evaluate cycle)
         self._shadow_analyzed = 0
         self._shadow_skipped_dedup = 0
         self._shadow_skipped_price = 0
@@ -164,10 +164,10 @@ class PolyNewsEdge(BaseStrategy):
                 if ne_exposure >= cap:
                     break
 
-        # 5. Log shadow metrics summary
+        # 5. Log strategy metrics summary
         if self._shadow_analyzed > 0 or self._shadow_skipped_dedup > 0:
             self.logger.info(
-                "Shadow metrics: analyzed=%d skipped_dedup=%d skipped_price=%d "
+                "Strategy metrics: analyzed=%d skipped_dedup=%d skipped_price=%d "
                 "skipped_edge=%d signals=%d",
                 self._shadow_analyzed, self._shadow_skipped_dedup,
                 self._shadow_skipped_price, self._shadow_skipped_edge,
