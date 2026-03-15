@@ -321,8 +321,12 @@ class Engine:
         order_id = order_result.get("order_id", "")
         if not order_id:
             return
-        # NE limit orders can take much longer to fill than MM orders (TTL 300s)
-        timeout = 3600 if sig.strategy == "news_edge" else 360
+        # NE entries: 60 min (limit orders take time). NE exits: 15 min (urgency > queue).
+        # MM orders: 6 min (TTL-based, fast fill or cancel).
+        if sig.strategy == "news_edge":
+            timeout = 900 if sig.metadata.get("close") else 3600
+        else:
+            timeout = 360
         self._pending_orders[order_id] = {
             "sig": sig,
             "order_id": order_id,
@@ -472,6 +476,11 @@ class Engine:
             logger.info("Fill reconciled: %s %s $%.2f @ %.4f (order: %s, filled: %.1f/%.1f)",
                         sig.direction, sig.symbol, filled_usd, filled_price, order_id[:12],
                         pending.get("filled_so_far", filled_shares), original_shares)
+            if should_close:
+                reason = sig.metadata.get("reason", "exit")
+                pnl_pct = (pnl / max(sig.size_usd, 0.01)) * 100
+                logger.info("Live close [%s]: %s PnL %+.1f%% / $%+.2f",
+                            reason, sig.symbol[:40], pnl_pct, pnl)
 
     async def _daily_reset_loop(self):
         """Reset daily risk counters at midnight UTC."""

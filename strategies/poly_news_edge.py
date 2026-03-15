@@ -74,6 +74,10 @@ class PolyNewsEdge(BaseStrategy):
         self._last_refresh = 0.0
         # market_id → (timestamp, news_hash) — dedup + cooldown
         self._analyzed: dict[str, tuple[float, str]] = {}
+        # token_id → timestamp of last exit attempt — prevents re-posting
+        # the same exit order before the previous one expires (16 min = 15 min timeout + buffer)
+        self._exit_pending: dict[str, float] = {}
+        self._exit_repost_wait = 960  # seconds
 
         # Shadow portfolio — virtual positions to measure strategy quality before live
         # token_id → {question, side, entry_price, size_usd, entry_time}
@@ -179,22 +183,28 @@ class PolyNewsEdge(BaseStrategy):
     def _check_exits(self) -> list[Signal]:
         """Generate SELL signals for TP/SL/timeout on existing NE positions."""
         signals = []
+        now = time.time()
         for key, pos in list(self.portfolio.positions.items()):
             if pos.strategy != self.name:
                 continue
             if pos.avg_price <= 0:
                 continue
-            # Fallback: if WS price stale/missing, try orderbook or shortlist
-            if pos.current_price <= 0:
-                fallback = self._get_shadow_price(pos.market_id)
-                if fallback > 0:
-                    pos.current_price = fallback
-                    self.logger.debug("Price fallback for %s: %.4f", pos.symbol[:30], fallback)
-                else:
-                    continue
+
+            # Skip if an exit order was placed recently — wait for it to fill or expire
+            last_exit = self._exit_pending.get(pos.market_id, 0)
+            if now - last_exit < self._exit_repost_wait:
+                continue
+
+            # Refresh price from orderbook on each exit check (avoid stale WS price)
+            fresh_price = self._get_shadow_price(pos.market_id)
+            if fresh_price > 0:
+                pos.current_price = fresh_price
+            elif pos.current_price <= 0:
+                self.logger.debug("No price for exit check: %s", pos.symbol[:30])
+                continue
 
             pnl_pct = (pos.current_price - pos.avg_price) / pos.avg_price
-            hold_hours = (time.time() - pos.entry_time) / 3600
+            hold_hours = (now - pos.entry_time) / 3600
             shares = pos.size / max(pos.avg_price, 0.01)
 
             close_reason = None
@@ -209,6 +219,7 @@ class PolyNewsEdge(BaseStrategy):
                 price = max(pos.current_price, 0.01)
                 # Use shares * price so close_position() recovers exact share count
                 size_usd = shares * price
+                self._exit_pending[pos.market_id] = now
                 self.logger.info(
                     "Exit %s %s: %s (PnL %.1f%%, hold %.1fh)",
                     pos.symbol, pos.market_id[:12], close_reason, pnl_pct * 100, hold_hours,
