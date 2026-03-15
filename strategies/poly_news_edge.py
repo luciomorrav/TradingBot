@@ -62,6 +62,7 @@ class PolyNewsEdge(BaseStrategy):
         self.ne_min_hours = ne.get("min_hours_to_expiry", 48)
         self.min_yes_price = ne.get("min_yes_price", 0.08)
         self.max_yes_price = ne.get("max_yes_price", 0.92)
+        self.min_buy_price = ne.get("min_buy_price", 0.02)
         self.max_end_date_days = ne.get("max_end_date_days", 30)
         self.max_open_positions = ne.get("max_open_positions", 3)
 
@@ -424,10 +425,10 @@ class PolyNewsEdge(BaseStrategy):
             # stale or from a thin order book and unreliable
             buy_price = 1 - current_price
 
-        # Minimum price guard — skip if price is too low to be meaningful
-        if buy_price < 0.02:
+        # Minimum price guard — skip if upside is too limited (configurable, default 0.02)
+        if buy_price < self.min_buy_price:
             self._shadow_skipped_price += 1
-            self.logger.debug("Skip %s: buy_price %.4f too low", market.question[:40], buy_price)
+            self.logger.debug("Skip %s: buy_price %.4f < min %.2f", market.question[:40], buy_price, self.min_buy_price)
             return None
 
         # Size: min of per-market cap and remaining strategy cap
