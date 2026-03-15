@@ -550,6 +550,43 @@ class Engine:
                             f"⏰ Order timeout: {sym} ${pending.get('size_usd', 0):.0f} "
                             f"cancelled after {timeout_s // 60}min (no fill)"
                         )
+
+                    # Dust fill: if BUY expired with tiny partial fill (<30%), auto-exit immediately
+                    filled_so_far = pending.get("filled_so_far", 0.0)
+                    if pending.get("side") == "buy" and filled_so_far > 0:
+                        original_shares = pending["size_usd"] / max(pending["price"], 0.01)
+                        fill_ratio = filled_so_far / max(original_shares, 0.01)
+                        if fill_ratio < 0.30:
+                            filled_usd = filled_so_far * pending["price"]
+                            exit_price = pending["price"]
+                            if self.poly_client:
+                                try:
+                                    token_id = pending.get("token_id", "")
+                                    bids = await self.poly_client.get_token_prices([token_id])
+                                    if bids and token_id in bids:
+                                        exit_price = bids[token_id].get("bid", exit_price) or exit_price
+                                except Exception:
+                                    pass
+                            logger.warning(
+                                "Dust fill detected: %s filled only %.0f%% ($%.2f) — queueing auto-exit",
+                                sym, fill_ratio * 100, filled_usd,
+                            )
+                            dust_sig = Signal(
+                                direction="sell",
+                                symbol=sig.symbol if sig else sym,
+                                market_id=pending.get("token_id", ""),
+                                price=exit_price,
+                                size_usd=filled_usd,
+                                strategy=sig.strategy if sig else "news_edge",
+                                confidence=1.0,
+                                metadata={
+                                    "close": True,
+                                    "token_id": pending.get("token_id", ""),
+                                    "reason": "dust",
+                                },
+                            )
+                            await self._process_signal(dust_sig)
+
                 if stale:
                     self._update_reserved_cash()
             except asyncio.CancelledError:

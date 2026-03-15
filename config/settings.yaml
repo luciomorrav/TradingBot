@@ -74,7 +74,7 @@ polymarket:
     max_position_per_market: 5   # USD per directional bet (reduced for live validation phase)
     strategy_cap_pct: 10.0       # max 10% of equity for News Edge total
     max_open_positions: 3        # max concurrent NE positions
-    max_markets: 10              # markets to scan per cycle
+    max_markets: 20              # markets to scan per cycle
     cooldown_hours: 12           # don't re-analyze same market within 12h
     take_profit_pct: 0.20        # close at +20%
     stop_loss_pct: 0.15          # close at -15%
