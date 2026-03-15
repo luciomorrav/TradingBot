@@ -1509,3 +1509,78 @@ async def test_news_edge_max_open_positions():
     # No new entries — max_open_positions reached
     assert len(signals) == 0
     llm.estimate_probability.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_news_edge_second_opinion_borderline_confirms():
+    """Borderline edge (0.14) calls LLM twice; averaged result still above threshold → signal."""
+    import time
+    from connectors.polymarket_client import Market
+    from unittest.mock import AsyncMock
+
+    ne, portfolio, llm, scraper = _make_news_edge(shadow=True)
+    ne.second_opinion_threshold = 0.20  # borderline window: [0.12, 0.20)
+
+    scraper.fetch_news = AsyncMock(return_value=([{"title": "Borderline news"}], "hash_border"))
+    # Both calls return edge ~0.14 (prob=0.64, market=0.50)
+    llm.estimate_probability = AsyncMock(return_value={
+        "probability": 0.64, "confidence": 0.70, "reasoning": "Slight edge", "cost_usd": 0.0002,
+    })
+
+    from connectors.polymarket_client import Market
+    market = Market(
+        id="m_border", question="Will borderline event happen?", slug="border", active=True,
+        end_date="2026-06-01T00:00:00Z",
+        tokens=[
+            {"token_id": "tok_border_yes", "outcome": "Yes", "price": 0.50},
+            {"token_id": "tok_border_no", "outcome": "No", "price": 0.50},
+        ],
+        volume=5000, liquidity=1000,
+    )
+    ne._markets = [market]
+    ne._last_refresh = time.time()
+
+    signals = await ne.evaluate()
+
+    # LLM called twice (second opinion for borderline edge)
+    assert llm.estimate_probability.call_count == 2
+    # Averaged result: prob=0.64, edge=0.14 > 0.12 → signal generated
+    assert len(signals) == 1
+    assert signals[0].direction == "buy"
+
+
+@pytest.mark.asyncio
+async def test_news_edge_second_opinion_borderline_rejects():
+    """Borderline edge: first call passes, second call disagrees → averaged edge below threshold → no signal."""
+    import time
+    from connectors.polymarket_client import Market
+    from unittest.mock import AsyncMock
+
+    ne, portfolio, llm, scraper = _make_news_edge(shadow=True)
+    ne.second_opinion_threshold = 0.20
+
+    scraper.fetch_news = AsyncMock(return_value=([{"title": "Conflicting news"}], "hash_conflict"))
+    # First call: edge=+0.14 (passes threshold). Second call: edge=-0.02 (opposite direction).
+    # Averaged: prob=(0.64+0.48)/2=0.56, edge=0.06 < 0.12 → reject.
+    llm.estimate_probability = AsyncMock(side_effect=[
+        {"probability": 0.64, "confidence": 0.70, "reasoning": "Bullish", "cost_usd": 0.0002},
+        {"probability": 0.48, "confidence": 0.68, "reasoning": "Bearish", "cost_usd": 0.0002},
+    ])
+
+    market = Market(
+        id="m_conflict", question="Will conflicting event happen?", slug="conflict", active=True,
+        end_date="2026-06-01T00:00:00Z",
+        tokens=[
+            {"token_id": "tok_conflict_yes", "outcome": "Yes", "price": 0.50},
+            {"token_id": "tok_conflict_no", "outcome": "No", "price": 0.50},
+        ],
+        volume=5000, liquidity=1000,
+    )
+    ne._markets = [market]
+    ne._last_refresh = time.time()
+
+    signals = await ne.evaluate()
+
+    # LLM called twice, averaged edge too low → no signal
+    assert llm.estimate_probability.call_count == 2
+    assert len(signals) == 0

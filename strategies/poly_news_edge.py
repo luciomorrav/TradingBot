@@ -65,6 +65,9 @@ class PolyNewsEdge(BaseStrategy):
         self.min_buy_price = ne.get("min_buy_price", 0.02)
         self.max_end_date_days = ne.get("max_end_date_days", 30)
         self.max_open_positions = ne.get("max_open_positions", 3)
+        # Second opinion: call LLM twice and average when edge is borderline
+        # (edge_threshold <= abs(edge) < second_opinion_threshold)
+        self.second_opinion_threshold = ne.get("second_opinion_threshold", 0.20)
 
         # Sports/noise filters
         self._excluded_keywords = ne.get("excluded_keywords", [])
@@ -405,6 +408,28 @@ class PolyNewsEdge(BaseStrategy):
         if abs(edge) < self.edge_threshold or conf < self.min_confidence:
             self._shadow_skipped_edge += 1
             return None
+
+        # Second opinion: borderline edge → call LLM again, average results
+        # Only for abs(edge) in [edge_threshold, second_opinion_threshold)
+        if abs(edge) < self.second_opinion_threshold:
+            result2 = await self.llm.estimate_probability(
+                market_question=market.question,
+                outcome_name="Yes",
+                current_price=current_price,
+                headlines=headline_titles,
+            )
+            if result2:
+                await self.portfolio.add_llm_cost(result2.get("cost_usd", 0))
+                prob = (prob + result2["probability"]) / 2
+                conf = (conf + result2["confidence"]) / 2
+                edge = prob - current_price
+                self.logger.info(
+                    "Second opinion (borderline): prob=%.2f conf=%.2f edge=%+.2f",
+                    prob, conf, edge,
+                )
+                if abs(edge) < self.edge_threshold or conf < self.min_confidence:
+                    self._shadow_skipped_edge += 1
+                    return None
 
         # Determine which token to buy
         if edge > 0:

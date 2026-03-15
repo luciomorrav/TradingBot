@@ -86,6 +86,7 @@ polymarket:
     min_yes_price: 0.08          # skip obvious No (Yes < 8c)
     max_yes_price: 0.92          # skip obvious Yes (Yes > 92c)
     min_buy_price: 0.15          # skip if bought side costs < 15c (low upside/asym risk)
+    second_opinion_threshold: 0.20  # call LLM twice when edge in [0.12, 0.20) and average
     excluded_categories:
       - "Sports"
     excluded_keywords:
