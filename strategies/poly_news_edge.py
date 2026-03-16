@@ -90,7 +90,8 @@ class PolyNewsEdge(BaseStrategy):
 
         # Strategy metrics (reset each evaluate cycle)
         self._shadow_analyzed = 0
-        self._shadow_skipped_dedup = 0
+        self._shadow_skipped_same_hash = 0   # same news hash — no point re-analyzing
+        self._shadow_skipped_cooldown = 0    # different news but cooldown still active
         self._shadow_skipped_price = 0
         self._shadow_skipped_edge = 0
         self._shadow_signals = 0
@@ -130,9 +131,10 @@ class PolyNewsEdge(BaseStrategy):
     async def evaluate(self) -> list[Signal]:
         signals: list[Signal] = []
 
-        # Reset shadow counters each cycle
+        # Reset strategy metrics each cycle
         self._shadow_analyzed = 0
-        self._shadow_skipped_dedup = 0
+        self._shadow_skipped_same_hash = 0
+        self._shadow_skipped_cooldown = 0
         self._shadow_skipped_price = 0
         self._shadow_skipped_edge = 0
         self._shadow_signals = 0
@@ -163,21 +165,30 @@ class PolyNewsEdge(BaseStrategy):
             return signals
 
         # 4. Scan markets for entry signals
+        # Track new signals emitted this cycle to enforce max_open_positions correctly.
+        # The ne_positions count is a snapshot taken before the loop — without this counter
+        # the bot could emit multiple signals in one cycle and exceed the cap.
+        new_entry_signals = 0
         for market in self._markets:
+            if len(ne_positions) + new_entry_signals >= self.max_open_positions:
+                break
             sig = await self._analyze_market(market, cap - ne_exposure)
             if sig:
                 signals.append(sig)
+                new_entry_signals += 1
                 self._shadow_signals += 1
                 ne_exposure += sig.size_usd
                 if ne_exposure >= cap:
                     break
 
         # 5. Log strategy metrics summary
-        if self._shadow_analyzed > 0 or self._shadow_skipped_dedup > 0:
+        total_skipped = self._shadow_skipped_same_hash + self._shadow_skipped_cooldown
+        if self._shadow_analyzed > 0 or total_skipped > 0:
             self.logger.info(
-                "Strategy metrics: analyzed=%d skipped_dedup=%d skipped_price=%d "
-                "skipped_edge=%d signals=%d",
-                self._shadow_analyzed, self._shadow_skipped_dedup,
+                "Strategy metrics: analyzed=%d skipped_same_hash=%d skipped_cooldown=%d "
+                "skipped_price=%d skipped_edge=%d signals=%d",
+                self._shadow_analyzed,
+                self._shadow_skipped_same_hash, self._shadow_skipped_cooldown,
                 self._shadow_skipped_price, self._shadow_skipped_edge,
                 self._shadow_signals,
             )
@@ -246,6 +257,10 @@ class PolyNewsEdge(BaseStrategy):
                     },
                 ))
         return signals
+
+    def check_exits(self) -> list:
+        """Public interface for fast exit loop in engine (called every 2 min)."""
+        return self._check_exits()
 
     async def _check_shadow_exits(self):
         """Check shadow positions for TP/SL/timeout and record virtual PnL."""
@@ -359,10 +374,10 @@ class PolyNewsEdge(BaseStrategy):
         if market_id in self._analyzed:
             last_ts, last_hash = self._analyzed[market_id]
             if news_hash == last_hash:
-                self._shadow_skipped_dedup += 1
+                self._shadow_skipped_same_hash += 1
                 return None  # same news — no point re-analyzing
             if time.time() - last_ts < self.cooldown_hours * 3600:
-                self._shadow_skipped_dedup += 1
+                self._shadow_skipped_cooldown += 1
                 return None  # different news but cooldown still active
 
         # Pick the "Yes" outcome for analysis (binary market)

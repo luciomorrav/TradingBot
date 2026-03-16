@@ -96,6 +96,9 @@ class Engine:
         # Pending order cleanup task (live mode)
         self._tasks.append(asyncio.create_task(self._pending_order_cleanup_loop(), name="pending_cleanup"))
 
+        # Fast exit check loop — runs every 2 min to reduce gap risk on SL/TP
+        self._tasks.append(asyncio.create_task(self._fast_exit_loop(), name="fast_exit"))
+
         # Exchange reconciliation task (live mode)
         self._tasks.append(asyncio.create_task(self._reconciliation_loop(), name="reconciliation"))
 
@@ -459,6 +462,8 @@ class Engine:
 
             if should_close:
                 pnl = await self.portfolio.close_position(trade)
+                # Accumulate realized PnL across partial fills
+                pending["realized_pnl"] = pending.get("realized_pnl", 0.0) + pnl
             else:
                 await self.portfolio.open_position(trade)
 
@@ -476,11 +481,16 @@ class Engine:
             logger.info("Fill reconciled: %s %s $%.2f @ %.4f (order: %s, filled: %.1f/%.1f)",
                         sig.direction, sig.symbol, filled_usd, filled_price, order_id[:12],
                         pending.get("filled_so_far", filled_shares), original_shares)
+
+            # Log Live close only once — when position is fully gone from portfolio
             if should_close:
-                reason = sig.metadata.get("reason", "exit")
-                pnl_pct = (pnl / max(sig.size_usd, 0.01)) * 100
-                logger.info("Live close [%s]: %s PnL %+.1f%% / $%+.2f",
-                            reason, sig.symbol[:40], pnl_pct, pnl)
+                pos_key = self.portfolio._position_key(trade.platform, trade.market_id, trade.strategy)
+                if pos_key not in self.portfolio.positions:
+                    reason = sig.metadata.get("reason", "exit")
+                    total_pnl = pending.get("realized_pnl", pnl)
+                    pnl_pct = (total_pnl / max(sig.size_usd, 0.01)) * 100
+                    logger.info("Live close [%s]: %s PnL %+.1f%% / $%+.2f",
+                                reason, sig.symbol[:40], pnl_pct, total_pnl)
 
     async def _daily_reset_loop(self):
         """Reset daily risk counters at midnight UTC."""
@@ -593,6 +603,26 @@ class Engine:
                 raise
             except Exception:
                 logger.exception("Error in pending order cleanup")
+
+    async def _fast_exit_loop(self):
+        """Check exits every 2 min (faster than the 10-min strategy cycle).
+        Reduces gap risk: SL/TP triggers sooner after a price move."""
+        await asyncio.sleep(60)  # initial delay — let bot settle
+        while self._running:
+            try:
+                await asyncio.sleep(120)  # 2 min
+                if self.mode != "live":
+                    continue
+                for name, runner in self.strategies.items():
+                    if not hasattr(runner.strategy, "check_exits"):
+                        continue
+                    signals = runner.strategy.check_exits()
+                    for sig in signals:
+                        await self._process_signal(sig)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Error in fast exit loop")
 
     async def _reconciliation_loop(self):
         """Reconcile bot state vs exchange every 10 minutes (live mode only)."""
