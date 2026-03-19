@@ -34,6 +34,11 @@ class NewsScraper:
         """
         now = time.time()
 
+        # Evict expired entries — prevents unbounded growth in long-running processes
+        expired = [k for k, v in self._cache.items() if now - v[0] >= self._cache_ttl]
+        for k in expired:
+            del self._cache[k]
+
         # Check cache
         if query in self._cache:
             ts, headlines, h = self._cache[query]

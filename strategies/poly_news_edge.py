@@ -222,6 +222,15 @@ class PolyNewsEdge(BaseStrategy):
             hold_hours = (now - pos.entry_time) / 3600
             shares = pos.size / max(pos.avg_price, 0.01)
 
+            # Polymarket minimum order size is 5 shares — can't place a sell below this.
+            # Log and skip; position will be caught by reconciliation or market resolution.
+            if shares < 5:
+                self.logger.warning(
+                    "Exit skipped: %s has only %.2f shares (< 5 Polymarket minimum)",
+                    pos.symbol[:30], shares,
+                )
+                continue
+
             close_reason = None
             if pnl_pct >= self.take_profit:
                 close_reason = "TP"
@@ -580,6 +589,23 @@ class PolyNewsEdge(BaseStrategy):
             "News Edge: refreshed %d markets (from %d candidates)",
             len(self._markets), len(candidates),
         )
+
+        # Prune stale order books — keep only current shortlist + open positions.
+        # Prevents _order_books and _subscribed_tokens growing unboundedly in long runs.
+        active_tokens = {t["token_id"] for m in self._markets for t in m.tokens}
+        position_tokens = {
+            pos.market_id for pos in self.portfolio.positions.values()
+            if pos.strategy == self.name
+        }
+        self.client.prune_subscriptions(active_tokens | position_tokens)
+
+        # Purge _analyzed entries older than 2x cooldown — same logic as on restore.
+        cutoff = time.time() - self.cooldown_hours * 2 * 3600
+        before = len(self._analyzed)
+        self._analyzed = {k: v for k, v in self._analyzed.items() if v[0] > cutoff}
+        pruned = before - len(self._analyzed)
+        if pruned:
+            self.logger.debug("Purged %d stale _analyzed entries", pruned)
 
     async def _subscribe_positions(self):
         """Subscribe to WS price updates for all existing NE positions (may not be in shortlist)."""

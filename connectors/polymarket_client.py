@@ -216,6 +216,7 @@ class PolymarketClient:
     async def fetch_active_markets(self, limit: int = 100) -> list[Market]:
         """Fetch active markets from Gamma API."""
         markets: list[Market] = []
+        self._markets.clear()  # reset on each fetch — prevents unbounded growth
         offset = 0
         while True:
             params = {"limit": limit, "offset": offset, "closed": "false", "active": "true"}
@@ -567,6 +568,21 @@ class PolymarketClient:
         except Exception:
             logger.exception("Failed to derive API credentials")
             return {}
+
+    def prune_subscriptions(self, keep_token_ids: set[str]):
+        """Remove order books for tokens no longer in the active shortlist.
+
+        Called after each market refresh to prevent unbounded growth of _order_books
+        and _subscribed_tokens in a long-running process.
+        Note: Polymarket WS has no selective unsubscribe — stale messages for pruned
+        tokens are silently dropped by _handle_market_msg (token not in _order_books).
+        """
+        stale = set(self._order_books) - keep_token_ids
+        for token_id in stale:
+            del self._order_books[token_id]
+        self._subscribed_tokens &= keep_token_ids
+        if stale:
+            logger.debug("Pruned %d stale order books / subscriptions", len(stale))
 
     # --- Queries ---
 

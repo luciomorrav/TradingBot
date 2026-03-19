@@ -39,6 +39,7 @@ class Engine:
         self._running = False
         self._tasks: list[asyncio.Task] = []
         self._pending_orders: dict[str, dict] = {}  # order_id → {sig, token_id, side, ...}
+        self._recent_sigs: dict[str, tuple] = {}  # token_id → (sig, placed_at) — race window recovery
         self._fill_lock = asyncio.Lock()  # serialize fill processing
         self._ws_connected_check = None  # callable → bool, blocks live orders if WS down
         self.poly_client = None  # set by main.py for reconciliation queries
@@ -152,6 +153,13 @@ class Engine:
                 if not ok:
                     logger.debug("Live signal blocked by risk manager: %s", reason)
                     return
+
+            # Pre-register signal by token_id for race window recovery:
+            # WS MATCHED can arrive before post_order returns the order_id.
+            if sig.direction == "buy":
+                _tok = sig.metadata.get("token_id", "")
+                if _tok:
+                    self._recent_sigs[_tok] = (sig, time.time())
 
             result = await self.execute_callback(sig)
             if not result:
@@ -396,25 +404,53 @@ class Engine:
             }))
 
         if not matched_orders:
-            # Log unmatched fills — likely our order whose pending expired during WS downtime
-            maker_ids = [m.get("order_id", "?")[:12] for m in fill_data.get("maker_orders", [])]
-            logger.warning(
-                "Fill MATCHED but no pending order found (cleanup timeout?). "
-                "taker=%s makers=%s asset=%s price=%s size=%s | pending_keys=%d",
-                taker_id[:12] if taker_id else "none",
-                maker_ids,
-                fill_data.get("asset_id", "?")[:12],
-                fill_data.get("price", "?"),
-                fill_data.get("size", "?"),
-                len(self._pending_orders),
-            )
-            if self.notify_callback:
-                await self.notify_callback(
-                    f"⚠️ Fill received but unmatched (WS downtime?): "
-                    f"price={fill_data.get('price', '?')} "
-                    f"size={fill_data.get('size', '?')}"
+            # Race condition recovery: WS MATCHED can arrive before post_order returns order_id.
+            # Check if this fill matches a recently placed signal (within 5 min window).
+            asset_id = fill_data.get("asset_id", "")
+            if asset_id and asset_id in self._recent_sigs:
+                sig, placed_at = self._recent_sigs.pop(asset_id)
+                if time.time() - placed_at < 300:
+                    recovery_id = taker_id or f"race_{int(time.time())}"
+                    self._pending_orders[recovery_id] = {
+                        "sig": sig,
+                        "order_id": recovery_id,
+                        "token_id": asset_id,
+                        "side": sig.direction,
+                        "price": sig.price,
+                        "size_usd": sig.size_usd,
+                        "placed_at": placed_at,
+                        "timeout": 3600,
+                    }
+                    matched_orders = [(recovery_id, {
+                        "order_id": recovery_id,
+                        "matched_amount": fill_data.get("size", "0"),
+                        "price": fill_data.get("price", "0"),
+                    })]
+                    logger.warning(
+                        "Race recovery: fill arrived before pending registered (token: %s) — recovered OK",
+                        asset_id[:12],
+                    )
+
+            if not matched_orders:
+                # Log unmatched fills — likely our order whose pending expired during WS downtime
+                maker_ids = [m.get("order_id", "?")[:12] for m in fill_data.get("maker_orders", [])]
+                logger.warning(
+                    "Fill MATCHED but no pending order found (cleanup timeout?). "
+                    "taker=%s makers=%s asset=%s price=%s size=%s | pending_keys=%d",
+                    taker_id[:12] if taker_id else "none",
+                    maker_ids,
+                    fill_data.get("asset_id", "?")[:12],
+                    fill_data.get("price", "?"),
+                    fill_data.get("size", "?"),
+                    len(self._pending_orders),
                 )
-            return
+                if self.notify_callback:
+                    await self.notify_callback(
+                        f"⚠️ Fill received but unmatched (WS downtime?): "
+                        f"price={fill_data.get('price', '?')} "
+                        f"size={fill_data.get('size', '?')}"
+                    )
+                return
 
         for order_id, fill_info in matched_orders:
             pending = self._pending_orders.get(order_id)
@@ -568,37 +604,68 @@ class Engine:
                         fill_ratio = filled_so_far / max(original_shares, 0.01)
                         if fill_ratio < 0.30:
                             filled_usd = filled_so_far * pending["price"]
-                            exit_price = pending["price"]
-                            if self.poly_client:
-                                try:
-                                    token_id = pending.get("token_id", "")
-                                    bids = await self.poly_client.get_token_prices([token_id])
-                                    if bids and token_id in bids:
-                                        exit_price = bids[token_id].get("bid", exit_price) or exit_price
-                                except Exception:
-                                    pass
-                            logger.warning(
-                                "Dust fill detected: %s filled only %.0f%% ($%.2f) — queueing auto-exit",
-                                sym, fill_ratio * 100, filled_usd,
-                            )
-                            dust_sig = Signal(
-                                direction="sell",
-                                symbol=sig.symbol if sig else sym,
-                                market_id=pending.get("token_id", ""),
-                                price=exit_price,
-                                size_usd=filled_usd,
-                                strategy=sig.strategy if sig else "news_edge",
-                                confidence=1.0,
-                                metadata={
-                                    "close": True,
-                                    "token_id": pending.get("token_id", ""),
-                                    "reason": "dust",
-                                },
-                            )
-                            await self._process_signal(dust_sig)
+                            # Polymarket minimum order size is 5 shares.
+                            # If dust is below minimum, we can't sell on exchange —
+                            # close the position locally to free the portfolio slot.
+                            if filled_so_far < 5:
+                                logger.warning(
+                                    "Dust too small to exit on exchange: %s (%.2f shares < 5 min) — closing locally",
+                                    sym, filled_so_far,
+                                )
+                                token_id = pending.get("token_id", "")
+                                if token_id and sig:
+                                    dust_trade = Trade(
+                                        trade_id=f"dust_{int(time.time())}",
+                                        platform=Platform.POLYMARKET,
+                                        market_id=token_id,
+                                        symbol=sig.symbol,
+                                        side=Side.SELL,
+                                        price=pending["price"],
+                                        size=filled_usd,
+                                        fee=0.0,
+                                        slippage=0.0,
+                                        strategy=sig.strategy,
+                                        timestamp=time.time(),
+                                        latency_ms=0.0,
+                                    )
+                                    await self.portfolio.close_position(dust_trade)
+                                    await self._save_portfolio_state()
+                            else:
+                                exit_price = pending["price"]
+                                if self.poly_client:
+                                    try:
+                                        token_id = pending.get("token_id", "")
+                                        bids = await self.poly_client.get_token_prices([token_id])
+                                        if bids and token_id in bids:
+                                            exit_price = bids[token_id].get("bid", exit_price) or exit_price
+                                    except Exception:
+                                        pass
+                                logger.warning(
+                                    "Dust fill detected: %s filled only %.0f%% ($%.2f) — queueing auto-exit",
+                                    sym, fill_ratio * 100, filled_usd,
+                                )
+                                dust_sig = Signal(
+                                    direction="sell",
+                                    symbol=sig.symbol if sig else sym,
+                                    market_id=pending.get("token_id", ""),
+                                    price=exit_price,
+                                    size_usd=filled_usd,
+                                    strategy=sig.strategy if sig else "news_edge",
+                                    confidence=1.0,
+                                    metadata={
+                                        "close": True,
+                                        "token_id": pending.get("token_id", ""),
+                                        "reason": "dust",
+                                    },
+                                )
+                                await self._process_signal(dust_sig)
 
                 if stale:
                     self._update_reserved_cash()
+
+                # Clean up stale race recovery signals (older than 5 min)
+                now2 = time.time()
+                self._recent_sigs = {k: v for k, v in self._recent_sigs.items() if now2 - v[1] < 300}
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -690,6 +757,12 @@ class Engine:
                 alerts.append(
                     f"Positions on exchange not in bot: {len(only_exchange)}"
                 )
+                # Repair: import phantom positions so SL/TP management kicks in
+                for asset_id in only_exchange:
+                    try:
+                        await self._import_phantom_position(asset_id, exchange_tokens[asset_id])
+                    except Exception:
+                        logger.exception("Failed to import phantom position: %s", asset_id[:12])
             if only_local:
                 alerts.append(
                     f"Positions in bot not on exchange: {len(only_local)}"
@@ -711,6 +784,45 @@ class Engine:
         elif not alerts:
             logger.info("Reconciliation OK — no discrepancies")
         self._last_recon_alerts = alerts
+
+    async def _import_phantom_position(self, token_id: str, shares: float):
+        """Import an exchange-only position into local portfolio for SL/TP management.
+
+        Used by reconciliation to repair positions missed due to race conditions.
+        Entry price is set to current market price (PnL tracking starts from now).
+        """
+        current_price = 0.5  # fallback if no book data
+        if self.poly_client:
+            book = self.poly_client.get_order_book(token_id)
+            if book and book.mid_price > 0:
+                current_price = book.mid_price
+
+        size_usd = shares * current_price
+        trade = Trade(
+            trade_id=f"recovered_{int(time.time())}",
+            platform=Platform.POLYMARKET,
+            market_id=token_id,
+            symbol=f"Recovered ({token_id[:12]})",
+            side=Side.BUY,
+            price=current_price,
+            size=size_usd,
+            fee=0.0,
+            slippage=0.0,
+            strategy="news_edge",
+            timestamp=time.time(),
+            latency_ms=0.0,
+        )
+        await self.portfolio.open_position(trade)
+        await self._save_portfolio_state()
+        logger.warning(
+            "Imported phantom position: token=%s shares=%.1f @ %.4f — SL/TP will apply from current price",
+            token_id[:12], shares, current_price,
+        )
+        if self.notify_callback:
+            await self.notify_callback(
+                f"🔧 Phantom position imported: {token_id[:12]}\n"
+                f"{shares:.1f} shares @ {current_price:.4f} (SL/TP from current price)"
+            )
 
     async def _shutdown(self):
         logger.info("Engine shutting down...")
